@@ -37,3 +37,9 @@ Repository = "https://github.com/j4ckxyz/skycoll"
 
 [project.scripts]
 skycoll = "skycoll.__main__:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "live: run tests against real network endpoints",
+    "live_full: run auth-required end-to-end command tests (requires existing local session)",
+]

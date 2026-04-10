@@ -7,7 +7,30 @@ events by handle or DID.  Prints matching events to stdout in real time.
 from __future__ import annotations
 
 import json
+import inspect
 import sys
+
+
+def _event_repo_did(event: object) -> str | None:
+    """Extract a repo DID from a firehose event object.
+
+    Supports both direct event fields and nested commit payloads across
+    atproto client versions.
+    """
+    repo_did = getattr(event, "did", None) or getattr(event, "repo", None)
+    if not repo_did and hasattr(event, "commit"):
+        commit = getattr(event, "commit")
+        repo_did = getattr(commit, "did", None) or getattr(commit, "repo", None)
+    return repo_did
+
+
+def _event_payload(event: object) -> object:
+    """Convert a firehose event object to a JSON-serializable payload."""
+    if hasattr(event, "model_dump"):
+        return event.model_dump()
+    if hasattr(event, "__dict__"):
+        return event.__dict__
+    return str(event)
 
 
 def run(
@@ -55,24 +78,14 @@ def run(
         nonlocal count
         client = AsyncFirehoseSubscribeReposClient(base_uri=relay)
 
-        async for event in client.start():
-            repo_did = getattr(event, 'did', None) or getattr(event, 'repo', None)
-            if not repo_did:
-                # Try the commit/message structure
-                if hasattr(event, 'commit'):
-                    repo_did = getattr(event.commit, 'did', None)
+        async def _on_message(event: object) -> None:
+            nonlocal count
 
+            repo_did = _event_repo_did(event)
             if filter_did and repo_did != filter_did:
-                continue
+                return
 
-            event_data = {}
-            if hasattr(event, 'model_dump'):
-                event_data = event.model_dump()
-            elif hasattr(event, '__dict__'):
-                event_data = event.__dict__
-            else:
-                event_data = str(event)
-
+            event_data = _event_payload(event)
             print(json.dumps(event_data, default=str, ensure_ascii=False))
             sys.stdout.flush()
 
@@ -80,6 +93,21 @@ def run(
             if limit and count >= limit:
                 print(f"\nReached limit of {limit} events.")
                 await client.stop()
+
+        # atproto API compatibility:
+        # - Newer versions: start(on_message_callback, ...)
+        # - Older versions: async iterator from start()
+        try:
+            start_sig = inspect.signature(client.start)
+            if len(start_sig.parameters) >= 1:
+                await client.start(_on_message)
+                return
+        except Exception:
+            pass
+
+        async for event in client.start():
+            await _on_message(event)
+            if limit and count >= limit:
                 break
 
     try:

@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .verbosity import vprint
+
 _BSKY_SOCIAL = "https://bsky.social"
 
 _DNS_TXT_RE = re.compile(r"did=(did:[a-z]+:[A-Za-z0-9._:-]+)")
@@ -43,16 +45,20 @@ def resolve_handle_to_did(handle: str) -> str:
     # 1) HTTPS well-known
     try:
         url = f"https://{handle}/.well-known/atproto-did"
+        vprint(f"resolve handle: GET {url}")
         resp = httpx.get(url, follow_redirects=True, timeout=10)
         if resp.status_code == 200:
             did = resp.text.strip()
             if did.startswith("did:"):
+                vprint("resolve handle: succeeded via HTTPS well-known")
                 return did
     except httpx.HTTPError:
+        vprint("resolve handle: HTTPS well-known failed")
         pass
 
     # 2) XRPC on bsky.social
     try:
+        vprint("resolve handle: trying bsky.social XRPC fallback")
         resp = httpx.get(
             f"{_BSKY_SOCIAL}/xrpc/com.atproto.identity.resolveHandle",
             params={"handle": handle},
@@ -62,20 +68,25 @@ def resolve_handle_to_did(handle: str) -> str:
             data = resp.json()
             did = data.get("did")
             if did:
+                vprint("resolve handle: succeeded via bsky.social XRPC")
                 return did
     except httpx.HTTPError:
+        vprint("resolve handle: bsky.social XRPC fallback failed")
         pass
 
     # 3) DNS TXT _atproto
     try:
         import dns.resolver
 
+        vprint("resolve handle: trying DNS _atproto TXT")
         answers = dns.resolver.resolve(f"_atproto.{handle}", "TXT")
         for rdata in answers:
             m = _DNS_TXT_RE.search(rdata.to_text())
             if m:
+                vprint("resolve handle: succeeded via DNS TXT")
                 return m.group(1)
     except Exception:
+        vprint("resolve handle: DNS TXT fallback failed")
         pass
 
     raise RuntimeError(
@@ -102,13 +113,16 @@ def resolve_did_to_handle(did: str) -> str:
     """
     # 1) Try DID document
     try:
+        vprint(f"resolve did: fetching DID document for {did}")
         doc = fetch_did_document(did)
         for aka in doc.get("alsoKnownAs", []):
             if aka.startswith("at://"):
+                vprint("resolve did: succeeded via DID document alsoKnownAs")
                 return aka[5:]
     except RuntimeError as exc:
         # 2) Fallback: bsky.social XRPC can resolve some DIDs directly
         try:
+            vprint("resolve did: trying bsky.social XRPC fallback")
             resp = httpx.get(
                 f"{_BSKY_SOCIAL}/xrpc/com.atproto.identity.resolveHandle",
                 params={"handle": did},
@@ -118,8 +132,10 @@ def resolve_did_to_handle(did: str) -> str:
                 data = resp.json()
                 h = data.get("handle")
                 if h:
+                    vprint("resolve did: succeeded via bsky.social XRPC fallback")
                     return h
         except httpx.HTTPError:
+            vprint("resolve did: bsky.social XRPC fallback failed")
             pass
 
         raise RuntimeError(
@@ -160,6 +176,7 @@ def fetch_did_document(did: str) -> dict:
         )
 
     try:
+        vprint(f"fetch did document: GET {url}")
         resp = httpx.get(url, follow_redirects=True, timeout=15)
     except httpx.HTTPError as exc:
         raise RuntimeError(

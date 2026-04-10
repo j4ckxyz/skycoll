@@ -47,6 +47,7 @@ from cryptography.hazmat.primitives.serialization import (
 from cryptography.hazmat.primitives import hashes
 
 from .resolve import resolve, resolve_pds_endpoint, fetch_did_document
+from .verbosity import vprint
 
 SESSIONS_DIR = os.path.expanduser("~/.skycoll/sessions")
 
@@ -215,36 +216,45 @@ def discover_auth_server(pds_url: str) -> tuple[dict, str]:
     # Step 1: Try protected-resource metadata to find the auth server
     try:
         pr_url = f"{pds_url}/.well-known/oauth-protected-resource"
+        vprint(f"auth discovery: GET {pr_url}")
         resp = httpx.get(pr_url, follow_redirects=True, timeout=15)
         if resp.status_code == 200:
             pr_data = resp.json()
             servers = pr_data.get("authorization_servers", [])
             if servers:
                 auth_server_origin = servers[0].rstrip("/")
+                vprint(f"auth discovery: protected-resource auth server -> {auth_server_origin}")
     except httpx.HTTPError:
+        vprint("auth discovery: protected-resource fetch failed")
         pass
 
     # Step 2: Fetch auth server metadata from the discovered origin
     if auth_server_origin:
         try:
             as_url = f"{auth_server_origin}/.well-known/oauth-authorization-server"
+            vprint(f"auth discovery: GET {as_url}")
             resp = httpx.get(as_url, follow_redirects=True, timeout=15)
             if resp.status_code == 200:
                 meta = resp.json()
                 if meta.get("issuer", "").rstrip("/") == auth_server_origin:
+                    vprint("auth discovery: using delegated authorization server metadata")
                     return meta, auth_server_origin
         except httpx.HTTPError:
+            vprint("auth discovery: delegated authorization-server metadata fetch failed")
             pass
 
     # Step 3: Fallback — try auth server metadata directly on the PDS
     try:
         as_url = f"{pds_url}/.well-known/oauth-authorization-server"
+        vprint(f"auth discovery: fallback GET {as_url}")
         resp = httpx.get(as_url, follow_redirects=True, timeout=15)
         if resp.status_code == 200:
             meta = resp.json()
             origin = meta.get("issuer", pds_url).rstrip("/")
+            vprint(f"auth discovery: fallback metadata accepted (issuer={origin})")
             return meta, origin
     except httpx.HTTPError:
+        vprint("auth discovery: fallback authorization-server metadata fetch failed")
         pass
 
     raise RuntimeError(
@@ -466,9 +476,10 @@ def _do_token_request(
         Tuple of (parsed JSON response, new DPoP-Nonce value).
     """
     nonce = dpop_nonce
-    for _ in range(2):
+    for attempt in range(2):
         proof = build_dpop_proof(dpop_key, "POST", token_url, nonce=nonce)
         headers = {"DPoP": proof, "Content-Type": "application/x-www-form-urlencoded"}
+        vprint(f"token request attempt={attempt + 1} nonce={'set' if nonce else 'none'}")
         resp = httpx.post(
             token_url,
             data=body,
@@ -477,6 +488,7 @@ def _do_token_request(
             timeout=30,
         )
         new_nonce = _extract_nonce_from_response(resp)
+        vprint(f"token response status={resp.status_code} nonce_header={'present' if new_nonce else 'absent'}")
 
         if resp.status_code == 200:
             return resp.json(), (new_nonce or nonce)
@@ -484,6 +496,7 @@ def _do_token_request(
         # AT Protocol OAuth servers can require a fresh DPoP nonce and
         # signal this with HTTP 400 + DPoP-Nonce. Retry once with it.
         if resp.status_code == 400 and new_nonce and new_nonce != nonce:
+            vprint("token request: retrying with server-provided DPoP nonce")
             nonce = new_nonce
             continue
 
@@ -514,6 +527,7 @@ def authenticate(handle: str) -> Session:
     identity = resolve(handle)
     did = identity["did"]
     pds = identity["pds"]
+    vprint(f"auth start handle={handle} did={did} pds={pds}")
 
     existing = Session.load(did)
     if existing is not None:
@@ -532,6 +546,11 @@ def authenticate(handle: str) -> Session:
     auth_url_base = meta["authorization_endpoint"]
     token_url = meta["token_endpoint"]
     par_url = meta.get("pushed_authorization_request_endpoint")
+    vprint(
+        "auth server metadata: "
+        f"origin={auth_server_origin} auth_endpoint={auth_url_base} "
+        f"token_endpoint={token_url} par_endpoint={par_url or 'none'}"
+    )
 
     # --- Loopback redirect URI ---
     port = secrets.randbelow(65535 - 49152) + 49152
@@ -571,16 +590,19 @@ def authenticate(handle: str) -> Session:
                 par_url, data=par_body, headers=par_headers,
                 follow_redirects=True, timeout=30,
             )
+            vprint(f"PAR response status={resp.status_code}")
 
             # If the server requires a DPoP nonce, retry once with it.
             new_nonce = _extract_nonce_from_response(resp)
             if new_nonce:
                 dpop_nonce = new_nonce
+                vprint("PAR response includes DPoP-Nonce")
             if resp.status_code == 400:
                 if not new_nonce:
                     new_nonce = resp.headers.get("DPoP-Nonce")
                 if new_nonce:
                     dpop_nonce = new_nonce
+                    vprint("PAR retrying with server-provided DPoP nonce")
                     proof = build_dpop_proof(dpop_key, "POST", par_url, nonce=dpop_nonce)
                     par_headers["DPoP"] = proof
                     resp = httpx.post(
@@ -590,6 +612,7 @@ def authenticate(handle: str) -> Session:
                         follow_redirects=True,
                         timeout=30,
                     )
+                    vprint(f"PAR retry response status={resp.status_code}")
                     new_nonce = _extract_nonce_from_response(resp)
                     if new_nonce:
                         dpop_nonce = new_nonce
@@ -605,6 +628,7 @@ def authenticate(handle: str) -> Session:
                 raise RuntimeError(
                     f"PAR response missing request_uri: {par_data}"
                 )
+            vprint("PAR succeeded; received request_uri")
 
             # Extract DPoP nonce from PAR response for later use
             if not dpop_nonce:
@@ -617,6 +641,7 @@ def authenticate(handle: str) -> Session:
             )
         else:
             # Fallback: auth server doesn't require PAR, build URL directly
+            vprint("PAR endpoint missing; falling back to direct authorization URL")
             auth_url = f"{auth_url_base}?{urlencode(auth_params)}"
             dpop_nonce = None
 
@@ -650,6 +675,7 @@ def authenticate(handle: str) -> Session:
         }
         token_data, new_nonce = _do_token_request(token_url, body, dpop_key, dpop_nonce)
         dpop_nonce = new_nonce
+        vprint("token exchange succeeded")
 
         # --- Verify sub matches expected DID ---
         returned_sub = token_data.get("sub", "")
@@ -706,6 +732,7 @@ def _maybe_refresh(session: Session) -> Optional[Session]:
     )
     headers = {"DPoP": proof, "Content-Type": "application/x-www-form-urlencoded"}
     resp = httpx.post(token_url, data=body, headers=headers, follow_redirects=True, timeout=30)
+    vprint(f"refresh token response status={resp.status_code}")
 
     new_nonce = _extract_nonce_from_response(resp)
     if new_nonce:
@@ -773,6 +800,10 @@ def make_authenticated_request(
     url = path if path.startswith("http") else f"{session.pds_endpoint}{path}"
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
+        vprint(
+            f"request attempt={attempt} method={method.upper()} url={url} "
+            f"appview={appview or 'none'}"
+        )
         proof = build_dpop_proof(
             session.dpop_key,
             method,
@@ -787,11 +818,13 @@ def make_authenticated_request(
             headers["atproto-proxy"] = appview
 
         resp = httpx.request(method, url, headers=headers, timeout=30, **kwargs)
+        vprint(f"response status={resp.status_code} url={url}")
 
         new_nonce = _extract_nonce_from_response(resp)
         if new_nonce:
             session.dpop_nonce_pds = new_nonce
             session.save()
+            vprint("updated PDS DPoP nonce from response")
 
         if resp.status_code == 429:
             wait = 2 ** attempt

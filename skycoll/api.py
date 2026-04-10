@@ -18,6 +18,7 @@ from typing import Generator, Optional
 import httpx
 
 from .auth import Session, make_authenticated_request
+from .verbosity import vprint
 
 _MAX_POSTS = 3000
 
@@ -53,6 +54,7 @@ def _paginated_get(
     max_retries = 3
 
     while True:
+        vprint(f"paginated GET start path={path} params={params}")
         for attempt in range(max_retries + 1):
             resp = make_authenticated_request(session, "GET", path, params=params, appview=appview)
 
@@ -74,6 +76,11 @@ def _paginated_get(
         items = data.get(collection_items_key, [])
         if not items and collection_items_key != "records":
             items = data.get("records", [])
+
+        vprint(
+            f"paginated GET page path={path} status={resp.status_code} "
+            f"items={len(items)} has_cursor={'yes' if data.get(cursor_key) else 'no'}"
+        )
 
         for item in items:
             yield item
@@ -339,6 +346,7 @@ def get_repo_car(session: Session, did: str, appview: Optional[str] = None) -> b
     """
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
+        vprint(f"getRepo attempt={attempt} did={did} appview={appview or 'none'}")
         resp = make_authenticated_request(
             session,
             "GET",

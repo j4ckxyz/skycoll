@@ -82,6 +82,9 @@ The `.dat` file includes:
 - `S` rows for starter packs
 - `K` rows for Constellation backlink counts (with `--constellation`)
 
+By default, labels are omitted from the profile row. Use `--labels` to include
+server/self labels in the `.dat` profile header.
+
 ### `appview` flag
 
 Several commands accept `--appview` to route API requests through a specific Bluesky-compatible AppView. This sets the `atproto-proxy` HTTP header to a service DID, rather than hardcoding a base URL.
@@ -147,6 +150,26 @@ skycoll likes j4ck.xyz
 Purge (delete all likes — the only write operation):
 ```bash
 skycoll likes j4ck.xyz --purge
+```
+
+Route likes reads through an alternative AppView:
+```bash
+skycoll likes j4ck.xyz --appview blacksky
+```
+
+## Verbose logging
+
+Use global verbose mode to print low-level network/auth debug logs:
+
+```bash
+skycoll --verbose init j4ck.xyz
+skycoll -v posts j4ck.xyz --car
+```
+
+You can also enable it via environment variable:
+
+```bash
+SKYCOLL_VERBOSE=1 skycoll init j4ck.xyz
 ```
 
 ### `threads`
@@ -244,6 +267,7 @@ skycoll firehose --handle j4ck.xyz --limit 100
 - **Session storage**: `~/.skycoll/sessions/<did>.json` (mode `0600`)
 - **`sub` verification**: Token exchange verifies the `sub` claim matches the expected DID
 - **`atproto-proxy` header**: Routes requests through a specified AppView service DID
+- **PAR + nonce handling**: Uses pushed authorization requests and retries with server-provided `DPoP-Nonce`
 
 ## PDS resolution
 

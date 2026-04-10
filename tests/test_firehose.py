@@ -1,4 +1,4 @@
-"""Tests for firehose event filtering logic."""
+"""Tests for firehose event filtering and event-shape helpers."""
 
 from __future__ import annotations
 
@@ -37,3 +37,35 @@ class TestFirehoseFilter:
     def test_missing_did_rejected(self):
         """Events without a DID or repo field should be rejected when filter is set."""
         assert _filter_event({"text": "hello"}, "did:plc:abc") is False
+
+
+class _Obj:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+def test_event_repo_did_from_direct_fields() -> None:
+    from skycoll.commands.firehose import _event_repo_did
+
+    assert _event_repo_did(_Obj(did="did:plc:abc")) == "did:plc:abc"
+    assert _event_repo_did(_Obj(repo="did:plc:def")) == "did:plc:def"
+
+
+def test_event_repo_did_from_commit_fields() -> None:
+    from skycoll.commands.firehose import _event_repo_did
+
+    ev1 = _Obj(commit=_Obj(did="did:plc:abc"))
+    ev2 = _Obj(commit=_Obj(repo="did:plc:def"))
+    assert _event_repo_did(ev1) == "did:plc:abc"
+    assert _event_repo_did(ev2) == "did:plc:def"
+
+
+def test_event_payload_prefers_model_dump() -> None:
+    from skycoll.commands.firehose import _event_payload
+
+    class _M:
+        def model_dump(self):
+            return {"ok": True}
+
+    assert _event_payload(_M()) == {"ok": True}

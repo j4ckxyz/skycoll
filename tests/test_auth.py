@@ -20,6 +20,7 @@ from skycoll.auth import (
     Session,
     discover_auth_server,
     _do_token_request,
+    make_authenticated_request,
     _b64url,
 )
 
@@ -364,3 +365,36 @@ class TestTokenRequest:
             )
 
         assert mock_post.call_count == 1
+
+
+class TestAuthenticatedRequest:
+    """Test nonce handling on authenticated PDS requests."""
+
+    @patch("skycoll.auth.Session.save")
+    @patch("skycoll.auth.httpx.request")
+    def test_401_with_new_nonce_is_retried(self, mock_request, mock_save):
+        """A 401 response with DPoP-Nonce should trigger a retry in the same call."""
+        key = generate_dpop_keypair()
+        session = Session(
+            did="did:plc:test",
+            handle="test.bsky.social",
+            access_token="token-abc",
+            refresh_token="refresh-abc",
+            dpop_key=key,
+            dpop_nonce_as="nonce-as",
+            dpop_nonce_pds=None,
+            pds_endpoint="https://pds.example.com",
+            token_expiry=9999999999.0,
+            auth_server_url="https://bsky.social/oauth/token",
+        )
+
+        first = _mock_response(401, json_data={"error": "use_dpop_nonce"}, headers={"DPoP-Nonce": "nonce-pds-1"})
+        second = _mock_response(200, json_data={"ok": True}, headers={})
+        mock_request.side_effect = [first, second]
+
+        resp = make_authenticated_request(session, "GET", "/xrpc/com.atproto.server.describeServer")
+
+        assert resp.status_code == 200
+        assert mock_request.call_count == 2
+        assert session.dpop_nonce_pds == "nonce-pds-1"
+        mock_save.assert_called()

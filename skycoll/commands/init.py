@@ -48,6 +48,11 @@ def run(
     print("Fetching profile …")
     profile = get_profile(session, session.did, appview=appview_did)
 
+    if not include_labels:
+        profile = dict(profile)
+        profile.pop("labels", None)
+        profile.pop("selfLabels", None)
+
     print("Fetching follows …")
     follows = list(get_follows(session, session.did, appview=appview_did))
 

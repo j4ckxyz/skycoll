@@ -2,18 +2,18 @@
 """skycoll — Bluesky/AT Protocol social-graph CLI (twecoll equivalent).
 
 Usage:
-    skycoll resolve <handle-or-did>
-    skycoll init <handle> [--lists] [--labels] [--appview NAME] [--constellation HOST]
-    skycoll fetch <handle>
-    skycoll posts <handle> [--car] [--appview NAME]
-    skycoll likes <handle> [-p|--purge] [--appview NAME]
-    skycoll threads <handle>
-    skycoll edgelist <handle> [--constellation HOST]
-    skycoll sync <handle>
-    skycoll backlinks <handle> --constellation HOST
-    skycoll plc <did> [--audit]
-    skycoll appviews
-    skycoll firehose [--did DID] [--handle HANDLE] [--relay URL] [--limit N]
+    skycoll [-v] resolve <handle-or-did>
+    skycoll [-v] init <handle> [--lists] [--labels] [--appview NAME] [--constellation HOST]
+    skycoll [-v] fetch <handle>
+    skycoll [-v] posts <handle> [--car] [--appview NAME]
+    skycoll [-v] likes <handle> [-p|--purge] [--appview NAME]
+    skycoll [-v] threads <handle>
+    skycoll [-v] edgelist <handle> [--constellation HOST]
+    skycoll [-v] sync <handle>
+    skycoll [-v] backlinks <handle> --constellation HOST
+    skycoll [-v] plc <did> [--audit]
+    skycoll [-v] appviews
+    skycoll [-v] firehose [--did DID] [--handle HANDLE] [--relay URL] [--limit N]
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import argparse
 import sys
 
 from skycoll import __version__
+from skycoll.verbosity import set_verbose
 
 
 def main() -> None:
@@ -31,6 +32,7 @@ def main() -> None:
         description="skycoll — Bluesky/AT Protocol social-graph CLI",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose debug logging")
 
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -96,6 +98,7 @@ def main() -> None:
     p_firehose.add_argument("--limit", type=int, default=None, help="Stop after N matching events")
 
     args = parser.parse_args()
+    set_verbose(bool(args.verbose))
 
     if args.command is None:
         parser.print_help()
@@ -119,7 +122,7 @@ def main() -> None:
 
     elif args.command == "likes":
         from skycoll.commands.likes import run
-        run(args.handle, purge=args.purge)
+        run(args.handle, purge=args.purge, appview=args.appview)
 
     elif args.command == "threads":
         from skycoll.commands.threads import run
