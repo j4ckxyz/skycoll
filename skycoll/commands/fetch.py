@@ -34,6 +34,14 @@ def _xrpc_url(pds_endpoint: str, path: str) -> str:
     return f"{base}{path}"
 
 
+def _fdat_path(handle: str) -> str:
+    return os.path.join(os.getcwd(), "fdat", f"{handle}.dat")
+
+
+def _fdat_exists(handle: str) -> bool:
+    return os.path.exists(_fdat_path(handle))
+
+
 def _rate_limit_backoff(attempt: int) -> float:
     return float(2 ** attempt)
 
@@ -119,9 +127,9 @@ async def _worker(
     worker_id: int,
     queue: asyncio.Queue[tuple[int, dict] | None],
     total: int,
-    pds_endpoint: str,
     client: httpx.AsyncClient,
     print_lock: asyncio.Lock,
+    skip_existing: bool,
 ) -> None:
     del worker_id  # workers are intentionally interchangeable.
 
@@ -139,8 +147,35 @@ async def _worker(
                 await _safe_warn(print_lock, f"[{idx}/{total}] Skipping entry without handle")
                 continue
 
+            if skip_existing and _fdat_exists(friend_handle):
+                await _safe_info(
+                    print_lock,
+                    f"  [{idx}/{total}] {friend_handle} → skipped (already exists)",
+                )
+                continue
+
             try:
-                profile = await _fetch_profile(client, friend_did or friend_handle, pds_endpoint)
+                identity = await asyncio.to_thread(resolve, friend_handle)
+            except SkycollError as exc:
+                await _safe_warn(
+                    print_lock,
+                    f"[{idx}/{total}] Resolve failed for {friend_handle}: {exc}",
+                )
+                continue
+
+            target_did = identity.get("did") if isinstance(identity, dict) else ""
+            target_pds = identity.get("pds") if isinstance(identity, dict) else ""
+            if not target_did:
+                target_did = friend_did or friend_handle
+            if not target_pds:
+                await _safe_warn(
+                    print_lock,
+                    f"[{idx}/{total}] Resolve failed for {friend_handle}: missing PDS endpoint",
+                )
+                continue
+
+            try:
+                profile = await _fetch_profile(client, target_did, target_pds)
             except SkycollError as exc:
                 await _safe_warn(
                     print_lock,
@@ -150,7 +185,7 @@ async def _worker(
 
             friend_follows: list[dict] = []
             try:
-                friend_follows = await _fetch_follows(client, friend_did or friend_handle, pds_endpoint)
+                friend_follows = await _fetch_follows(client, target_did, target_pds)
             except SkycollError as exc:
                 await _safe_warn(
                     print_lock,
@@ -171,7 +206,7 @@ async def _worker(
             queue.task_done()
 
 
-async def _run_workers(follows: list[dict], pds_endpoint: str, workers: int) -> None:
+async def _run_workers(follows: list[dict], workers: int, skip_existing: bool) -> None:
     queue: asyncio.Queue[tuple[int, dict] | None] = asyncio.Queue()
     total = len(follows)
     for idx, person in enumerate(follows, 1):
@@ -187,9 +222,9 @@ async def _run_workers(follows: list[dict], pds_endpoint: str, workers: int) -> 
                     worker_id=worker_id,
                     queue=queue,
                     total=total,
-                    pds_endpoint=pds_endpoint,
                     client=client,
                     print_lock=print_lock,
+                    skip_existing=skip_existing,
                 )
             )
             for worker_id in range(workers)
@@ -201,7 +236,7 @@ async def _run_workers(follows: list[dict], pds_endpoint: str, workers: int) -> 
             raise result
 
 
-def run(handle: str, workers: int = 1) -> None:
+def run(handle: str, workers: int = 1, skip_existing: bool = True) -> None:
     """Fetch the follows of every user listed in ``<handle>.dat``.
 
     Reads ``<handle>.dat``, iterates over every followed user, fetches
@@ -210,6 +245,7 @@ def run(handle: str, workers: int = 1) -> None:
     Args:
         handle: The focal user's handle (used to find ``<handle>.dat``).
         workers: Number of concurrent workers (1..10).
+        skip_existing: Skip handles that already have ``fdat/<handle>.dat``.
     """
     try:
         if workers < 1 or workers > _MAX_WORKERS:
@@ -222,16 +258,11 @@ def run(handle: str, workers: int = 1) -> None:
                 f"No .dat file found for '{handle}'. Run: skycoll init {handle}"
             ) from exc
 
-        identity = resolve(handle)
-        pds = identity.get("pds")
-        if not pds:
-            raise ParseError(f"resolved identity for '{handle}' is missing a PDS endpoint")
-
         follows = data.get("follows", [])
         if not isinstance(follows, list):
             raise ParseError(f"invalid .dat data for '{handle}': follows must be a list")
         info(f"Fetching follows for {len(follows)} users …")
-        asyncio.run(_run_workers(follows, pds, workers))
+        asyncio.run(_run_workers(follows, workers, skip_existing))
 
         ok("Done.")
     except SkycollError:

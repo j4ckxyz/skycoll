@@ -42,11 +42,11 @@ class TestFetchCommand:
             "pds": "https://pds.example.com",
         }
 
-        run("alice.bsky.social", workers=3)
+        run("alice.bsky.social", workers=3, skip_existing=False)
         mock_run_workers.assert_awaited_once_with(
             [{"handle": "bob.bsky.social", "did": "did:plc:bob"}],
-            "https://pds.example.com",
             3,
+            False,
         )
 
     def test_fetch_rejects_invalid_worker_count(self):

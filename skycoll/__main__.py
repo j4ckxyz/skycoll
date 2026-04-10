@@ -48,6 +48,12 @@ def main() -> None:
     p_fetch = sub.add_parser("fetch", help="Fetch follows of every handle in .dat, write to fdat/")
     p_fetch.add_argument("handle", help="The handle used in `skycoll init`")
     p_fetch.add_argument("--workers", type=int, default=1, help="Parallel workers for fetch (1-10)")
+    p_fetch.add_argument(
+        "--skip-existing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip users that already have fdat/<handle>.dat",
+    )
 
     # posts
     p_posts = sub.add_parser("posts", help="Download posts via feed (or --car for full repo sync), write .twt")
@@ -140,7 +146,7 @@ def main() -> None:
         elif args.command == "fetch":
             from skycoll.commands.fetch import run
 
-            run(args.handle, workers=args.workers)
+            run(args.handle, workers=args.workers, skip_existing=args.skip_existing)
 
         elif args.command == "posts":
             from skycoll.commands.posts import run

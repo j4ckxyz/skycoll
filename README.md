@@ -136,6 +136,12 @@ skycoll fetch j4ck.xyz
 
 # Parallel fetch with 5 workers (faster on large follow graphs)
 skycoll fetch j4ck.xyz --workers 5
+
+# Resume an interrupted fetch (default behavior)
+skycoll fetch j4ck.xyz --skip-existing
+
+# Re-fetch everything from scratch
+skycoll fetch j4ck.xyz --no-skip-existing
 ```
 
 ### `posts`

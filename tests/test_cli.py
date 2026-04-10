@@ -81,7 +81,17 @@ def test_fetch_workers_forwarded() -> None:
         with patch("skycoll.commands.fetch.run") as mock_run:
             cli.main()
 
-    mock_run.assert_called_once_with("alice.bsky.social", workers=5)
+    mock_run.assert_called_once_with("alice.bsky.social", workers=5, skip_existing=True)
+
+
+def test_fetch_skip_existing_forwarded() -> None:
+    from skycoll import __main__ as cli
+
+    with patch("sys.argv", ["skycoll", "fetch", "alice.bsky.social", "--no-skip-existing"]):
+        with patch("skycoll.commands.fetch.run") as mock_run:
+            cli.main()
+
+    mock_run.assert_called_once_with("alice.bsky.social", workers=1, skip_existing=False)
 
 
 def test_cli_handles_typed_errors_without_traceback(capsys) -> None:
