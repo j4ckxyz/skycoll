@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skycoll"
-version = "0.3.2"
+version = "0.3.3"
 description = "Bluesky/AT Protocol social-graph CLI — twecoll equivalent"
 readme = "README.md"
 license = "MIT"

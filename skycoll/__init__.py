@@ -1,3 +1,3 @@
 """skycoll — Bluesky/AT Protocol social-graph CLI (twecoll equivalent)."""
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
