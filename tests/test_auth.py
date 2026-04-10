@@ -1,4 +1,4 @@
-"""Tests for skycoll.auth — PKCE, DPoP proof structure, session persistence."""
+"""Tests for skycoll.auth — PKCE, DPoP proof structure, session persistence, OAuth discovery."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import json
 import os
 import stat
 import tempfile
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from skycoll.auth import (
@@ -16,8 +18,18 @@ from skycoll.auth import (
     private_key_to_jwk,
     jwk_to_private_key,
     Session,
+    discover_auth_server,
     _b64url,
 )
+
+
+def _mock_response(status_code=200, json_data=None, text=""):
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.json.return_value = json_data or {}
+    resp.text = text or (json.dumps(json_data) if json_data else "")
+    resp.headers = {}
+    return resp
 
 
 class TestPKCE:
@@ -207,3 +219,86 @@ class TestSessionFilePermissions:
         restored_pub = restored.public_key().public_numbers()
         assert orig_pub.x == restored_pub.x
         assert orig_pub.y == restored_pub.y
+
+
+class TestDiscoverAuthServer:
+    """Test OAuth auth server discovery via protected-resource metadata."""
+
+    @patch("skycoll.auth.httpx.get")
+    def test_delegated_auth_server(self, mock_get):
+        """PDS delegates to a separate auth server (e.g. bsky.social entryway)."""
+        pr_resp = MagicMock(spec=httpx.Response)
+        pr_resp.status_code = 200
+        pr_resp.json.return_value = {
+            "resource": "https://pds.example.com",
+            "authorization_servers": ["https://bsky.social"],
+        }
+        pr_resp.headers = {}
+
+        as_resp = MagicMock(spec=httpx.Response)
+        as_resp.status_code = 200
+        as_resp.json.return_value = {
+            "issuer": "https://bsky.social",
+            "authorization_endpoint": "https://bsky.social/oauth/authorize",
+            "token_endpoint": "https://bsky.social/oauth/token",
+            "pushed_authorization_request_endpoint": "https://bsky.social/oauth/par",
+        }
+        as_resp.headers = {}
+
+        mock_get.side_effect = [pr_resp, as_resp]
+        meta, origin = discover_auth_server("https://pds.example.com")
+        assert origin == "https://bsky.social"
+        assert meta["authorization_endpoint"] == "https://bsky.social/oauth/authorize"
+        assert meta["token_endpoint"] == "https://bsky.social/oauth/token"
+
+    @patch("skycoll.auth.httpx.get")
+    def test_pds_is_its_own_auth_server(self, mock_get):
+        """Self-hosted PDS that is also its own auth server."""
+        pr_resp = MagicMock(spec=httpx.Response)
+        pr_resp.status_code = 200
+        pr_resp.json.return_value = {
+            "resource": "https://self-hosted.example.com",
+            "authorization_servers": ["https://self-hosted.example.com"],
+        }
+        pr_resp.headers = {}
+
+        as_resp = MagicMock(spec=httpx.Response)
+        as_resp.status_code = 200
+        as_resp.json.return_value = {
+            "issuer": "https://self-hosted.example.com",
+            "authorization_endpoint": "https://self-hosted.example.com/oauth/authorize",
+            "token_endpoint": "https://self-hosted.example.com/oauth/token",
+        }
+        as_resp.headers = {}
+
+        mock_get.side_effect = [pr_resp, as_resp]
+        meta, origin = discover_auth_server("https://self-hosted.example.com")
+        assert origin == "https://self-hosted.example.com"
+
+    @patch("skycoll.auth.httpx.get")
+    def test_fallback_when_no_protected_resource(self, mock_get):
+        """Fall back to direct auth server metadata when protected-resource is 404."""
+        pr_resp = MagicMock(spec=httpx.Response)
+        pr_resp.status_code = 404
+        pr_resp.headers = {}
+
+        as_resp = MagicMock(spec=httpx.Response)
+        as_resp.status_code = 200
+        as_resp.json.return_value = {
+            "issuer": "https://pds.example.com",
+            "authorization_endpoint": "https://pds.example.com/oauth/authorize",
+            "token_endpoint": "https://pds.example.com/oauth/token",
+        }
+        as_resp.headers = {}
+
+        mock_get.side_effect = [pr_resp, as_resp]
+        meta, origin = discover_auth_server("https://pds.example.com")
+        assert origin == "https://pds.example.com"
+        assert meta["authorization_endpoint"] == "https://pds.example.com/oauth/authorize"
+
+    @patch("skycoll.auth.httpx.get")
+    def test_all_methods_fail(self, mock_get):
+        """Raise RuntimeError when auth server cannot be discovered."""
+        mock_get.return_value = MagicMock(status_code=404, headers={})
+        with pytest.raises(RuntimeError, match="Cannot discover OAuth auth server"):
+            discover_auth_server("https://unreachable.example.com")

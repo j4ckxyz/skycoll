@@ -4,11 +4,13 @@ Implements the full public-client (native-app) authorisation code flow:
 
   1. Generate PKCE verifier / S256 challenge.
   2. Generate ES256 DPoP keypair.
-  3. Discover the authorisation server from the PDS.
-  4. Open the browser to the authorisation endpoint so the user can consent.
-  5. Listen on a loopback redirect URI for the callback.
-  6. Exchange the authorisation code for tokens, binding DPoP proofs.
-  7. Persist the session to ``~/.skycoll/sessions/<did>.json`` (mode 0600).
+  3. Discover the authorisation server via
+     ``/.well-known/oauth-protected-resource`` (with fallback).
+  4. Submit a Pushed Authorization Request (PAR) to the auth server.
+  5. Open the browser to the authorisation endpoint so the user can consent.
+  6. Listen on a loopback redirect URI for the callback.
+  7. Exchange the authorisation code for tokens, binding DPoP proofs.
+  8. Persist the session to ``~/.skycoll/sessions/<did>.json`` (mode 0600).
 
 Scopes requested:
   - ``atproto`` — always required by the protocol.
@@ -32,7 +34,7 @@ import time
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional
-from urllib.parse import urlencode, parse_qs, urlparse
+from urllib.parse import urlencode, parse_qs, urlparse, quote
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -185,27 +187,74 @@ def generate_pkce() -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def discover_auth_server(pds_url: str) -> dict:
-    """Fetch the OAuth 2.0 Authorization Server metadata from a PDS.
+def discover_auth_server(pds_url: str) -> tuple[dict, str]:
+    """Discover the OAuth 2.0 Authorization Server for a PDS.
 
-    Queries ``<pds>/.well-known/oauth-authorization-server``.
+    Follows the AT Protocol OAuth discovery flow:
+
+      1. Fetch ``/.well-known/oauth-protected-resource`` from the PDS to
+         find the Authorization Server origin(s).
+      2. Fetch ``/.well-known/oauth-authorization-server`` from the
+         discovered Authorization Server.
+
+    If the PDS does not publish protected-resource metadata, falls back
+    to trying ``/.well-known/oauth-authorization-server`` on the PDS
+    directly (for self-hosted PDS instances that are also auth servers).
 
     Args:
         pds_url: Origin of the PDS (e.g. ``https://bsky.social``).
 
     Returns:
-        Parsed metadata dict.
+        Tuple of (auth_server_metadata, auth_server_origin).
 
     Raises:
-        RuntimeError: If metadata cannot be fetched.
+        RuntimeError: If metadata cannot be discovered by any method.
     """
-    url = f"{pds_url}/.well-known/oauth-authorization-server"
-    resp = httpx.get(url, follow_redirects=True, timeout=15)
-    if resp.status_code != 200:
-        raise RuntimeError(
-            f"Failed to fetch auth server metadata from {url} (HTTP {resp.status_code})"
-        )
-    return resp.json()
+    auth_server_origin = None
+
+    # Step 1: Try protected-resource metadata to find the auth server
+    try:
+        pr_url = f"{pds_url}/.well-known/oauth-protected-resource"
+        resp = httpx.get(pr_url, follow_redirects=True, timeout=15)
+        if resp.status_code == 200:
+            pr_data = resp.json()
+            servers = pr_data.get("authorization_servers", [])
+            if servers:
+                auth_server_origin = servers[0].rstrip("/")
+    except httpx.HTTPError:
+        pass
+
+    # Step 2: Fetch auth server metadata from the discovered origin
+    if auth_server_origin:
+        try:
+            as_url = f"{auth_server_origin}/.well-known/oauth-authorization-server"
+            resp = httpx.get(as_url, follow_redirects=True, timeout=15)
+            if resp.status_code == 200:
+                meta = resp.json()
+                if meta.get("issuer", "").rstrip("/") == auth_server_origin:
+                    return meta, auth_server_origin
+        except httpx.HTTPError:
+            pass
+
+    # Step 3: Fallback — try auth server metadata directly on the PDS
+    try:
+        as_url = f"{pds_url}/.well-known/oauth-authorization-server"
+        resp = httpx.get(as_url, follow_redirects=True, timeout=15)
+        if resp.status_code == 200:
+            meta = resp.json()
+            origin = meta.get("issuer", pds_url).rstrip("/")
+            return meta, origin
+    except httpx.HTTPError:
+        pass
+
+    raise RuntimeError(
+        f"Cannot discover OAuth auth server for {pds_url!r}.\n"
+        f"  Tried:\n"
+        f"    • PDS protected-resource metadata (.well-known/oauth-protected-resource)\n"
+        f"    • Authorization-server metadata on the PDS\n"
+        f"  If this PDS does not support OAuth, you may need to use an App Password.\n"
+        f"  See: skycoll init --help"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -430,8 +479,10 @@ def _do_token_request(
 def authenticate(handle: str) -> Session:
     """Run the full AT Protocol OAuth 2.0 public-client flow.
 
-    Discovers the PDS and authorisation server, launches a browser for
-    user consent, exchanges the code, and persists the session.
+    Discovers the PDS and authorisation server via
+    ``/.well-known/oauth-protected-resource``, uses PAR (Pushed
+    Authorization Request), launches a browser for user consent,
+    exchanges the code, and persists the session.
 
     Args:
         handle: The user's Bluesky handle.
@@ -459,9 +510,10 @@ def authenticate(handle: str) -> Session:
     dpop_key = generate_dpop_keypair()
 
     # --- Discover auth server ---
-    meta = discover_auth_server(pds)
+    meta, auth_server_origin = discover_auth_server(pds)
     auth_url_base = meta["authorization_endpoint"]
     token_url = meta["token_endpoint"]
+    par_url = meta.get("pushed_authorization_request_endpoint")
 
     # --- Loopback redirect URI ---
     port = secrets.randbelow(65535 - 49152) + 49152
@@ -471,17 +523,81 @@ def authenticate(handle: str) -> Session:
     # --- Start temporary server ---
     server = _start_callback_server(port, client_id)
     try:
-        # --- Build authorisation URL ---
-        params = {
+        # --- PAR (Pushed Authorization Request) ---
+        # AT Protocol requires PAR. If the auth server publishes a
+        # pushed_authorization_request_endpoint, we POST our request
+        # parameters there first and receive a request_uri.
+        state = secrets.token_urlsafe(16)
+        auth_params = {
             "response_type": "code",
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "scope": SCOPES,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
-            "state": secrets.token_urlsafe(16),
+            "state": state,
+            "login_hint": handle,
         }
-        auth_url = f"{auth_url_base}?{urlencode(params)}"
+
+        if par_url:
+            par_body = dict(auth_params)
+            dpop_nonce: Optional[str] = None
+
+            # First PAR attempt (may need DPoP nonce from 400 response)
+            proof = build_dpop_proof(dpop_key, "POST", par_url)
+            par_headers = {
+                "DPoP": proof,
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            resp = httpx.post(
+                par_url, data=par_body, headers=par_headers,
+                follow_redirects=True, timeout=30,
+            )
+
+            # If the server requires a DPoP nonce, retry with it
+            new_nonce = _extract_nonce_from_response(resp)
+            if new_nonce:
+                dpop_nonce = new_nonce
+            if resp.status_code == 400 and not new_nonce:
+                # Some servers return a Use-Nonce or similar hint
+                new_nonce = resp.headers.get("DPoP-Nonce")
+                if new_nonce:
+                    dpop_nonce = new_nonce
+                    proof = build_dpop_proof(dpop_key, "POST", par_url, nonce=dpop_nonce)
+                    par_headers["DPoP"] = proof
+                    resp = httpx.post(
+                        par_url, data=par_body, headers=par_headers,
+                        follow_redirects=True, timeout=30,
+                    )
+                    new_nonce = _extract_nonce_from_response(resp)
+                    if new_nonce:
+                        dpop_nonce = new_nonce
+
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"PAR request failed (HTTP {resp.status_code}): {resp.text}"
+                )
+
+            par_data = resp.json()
+            request_uri = par_data.get("request_uri")
+            if not request_uri:
+                raise RuntimeError(
+                    f"PAR response missing request_uri: {par_data}"
+                )
+
+            # Extract DPoP nonce from PAR response for later use
+            if not dpop_nonce:
+                dpop_nonce = new_nonce
+
+            # Build authorization URL with request_uri
+            auth_url = (
+                f"{auth_url_base}?client_id={quote(client_id, safe='')}"
+                f"&request_uri={quote(request_uri, safe='')}"
+            )
+        else:
+            # Fallback: auth server doesn't require PAR, build URL directly
+            auth_url = f"{auth_url_base}?{urlencode(auth_params)}"
+            dpop_nonce = None
 
         print(f"Opening browser for {handle} …")
         print(f"If the browser doesn't open, visit:\n  {auth_url}")
@@ -504,7 +620,6 @@ def authenticate(handle: str) -> Session:
         code = result["code"][0]
 
         # --- Exchange code for tokens ---
-        dpop_nonce: Optional[str] = None
         body = {
             "grant_type": "authorization_code",
             "code": code,
