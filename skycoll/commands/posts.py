@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from skycoll.api import get_repo_car, parse_car_records, get_author_feed
 from skycoll.appview import resolve_appview
-from skycoll.auth import get_authenticated_session
+from skycoll.auth import get_any_session
+from skycoll.resolve import resolve
 from skycoll.storage import write_twt
 
 
@@ -25,13 +26,18 @@ def run(handle: str, use_car: bool = False, appview: str | None = None) -> None:
         appview: Optional AppView name or DID (for ``atproto-proxy`` header).
     """
     appview_did = resolve_appview(appview)
-    print(f"Authenticating as {handle} …")
-    session = get_authenticated_session(handle)
-    did = session.did
+    target = resolve(handle)
+    target_did = target["did"]
+
+    session = get_any_session()
+    if session is None:
+        print("No cached OAuth session found. Run: skycoll init <your-handle>")
+        raise SystemExit(1)
+    print(f"Using cached session: {session.handle} ({session.did})")
 
     if use_car:
         print("Downloading full repo CAR (--car mode) …")
-        car_bytes = get_repo_car(session, did, appview=appview_did)
+        car_bytes = get_repo_car(session, target_did, appview=appview_did)
         print(f"CAR downloaded ({len(car_bytes)} bytes), parsing records …")
 
         all_records = parse_car_records(car_bytes)
@@ -49,7 +55,7 @@ def run(handle: str, use_car: bool = False, appview: str | None = None) -> None:
     else:
         print("Fetching posts via getAuthorFeed …")
         posts = []
-        for item in get_author_feed(session, did, appview=appview_did):
+        for item in get_author_feed(session, target_did, appview=appview_did):
             feed_item = item.get("post", item)
             value = feed_item.get("record", {})
             collection = "app.bsky.feed.post"

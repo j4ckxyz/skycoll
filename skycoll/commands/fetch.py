@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from skycoll.api import get_profile, get_follows, download_avatar
-from skycoll.auth import get_authenticated_session
+from skycoll.auth import get_any_session
 from skycoll.storage import read_dat, write_fdat, avatar_path
 
 
@@ -16,12 +16,20 @@ def run(handle: str) -> None:
     Args:
         handle: The focal user's handle (used to find ``<handle>.dat``).
     """
-    data = read_dat(handle)
+    try:
+        data = read_dat(handle)
+    except FileNotFoundError:
+        print(f"No .dat file found for '{handle}'. Run: skycoll init {handle}")
+        raise SystemExit(1)
+
     follows = data["follows"]
     print(f"Fetching follows for {len(follows)} users …")
 
-    print(f"Authenticating as {handle} …")
-    session = get_authenticated_session(handle)
+    session = get_any_session()
+    if session is None:
+        print("No cached OAuth session found. Run: skycoll init <your-handle>")
+        raise SystemExit(1)
+    print(f"Using cached session: {session.handle} ({session.did})")
 
     for i, person in enumerate(follows, 1):
         friend_handle = person.get("handle", "")

@@ -754,6 +754,46 @@ def get_authenticated_session(handle: str) -> Session:
     return authenticate(handle)
 
 
+def get_any_session() -> Optional[Session]:
+    """Return the first valid cached session from ``~/.skycoll/sessions``.
+
+    Sessions are scanned from disk and the first non-expired (or refreshable)
+    session is returned. This is intended for read-only commands where any
+    authenticated account can be used to read public data.
+
+    Returns:
+        A valid :class:`Session`, or ``None`` if no valid cached session exists.
+    """
+    if not os.path.isdir(SESSIONS_DIR):
+        return None
+
+    for entry in sorted(os.listdir(SESSIONS_DIR)):
+        if not entry.endswith(".json"):
+            continue
+
+        path = os.path.join(SESSIONS_DIR, entry)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            did = data.get("did", "")
+            if not did:
+                continue
+
+            session = Session.load(did)
+            if session is None:
+                continue
+
+            refreshed = _maybe_refresh(session)
+            if refreshed is not None:
+                vprint(f"using cached session for {refreshed.handle} ({refreshed.did})")
+                return refreshed
+        except Exception as exc:
+            vprint(f"skipping invalid session file {path}: {exc}")
+            continue
+
+    return None
+
+
 def make_authenticated_request(
     session: Session,
     method: str,

@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -23,6 +24,7 @@ from skycoll.auth import (
     _do_token_request,
     make_authenticated_request,
     _build_localhost_client_id,
+    get_any_session,
     _b64url,
 )
 
@@ -420,3 +422,46 @@ class TestLocalhostClientId:
         qs = parse_qs(parsed.query)
         assert qs.get("redirect_uri") == [redirect_uri]
         assert qs.get("scope") == [scope]
+
+
+class TestGetAnySession:
+    """Test selecting any valid cached session for read-only commands."""
+
+    def test_returns_none_when_no_sessions_exist(self, tmp_path, monkeypatch):
+        sessions_dir = str(tmp_path / "sessions")
+        monkeypatch.setattr("skycoll.auth.SESSIONS_DIR", sessions_dir)
+        assert get_any_session() is None
+
+    def test_returns_first_valid_session(self, tmp_path, monkeypatch):
+        sessions_dir = str(tmp_path / "sessions")
+        monkeypatch.setattr("skycoll.auth.SESSIONS_DIR", sessions_dir)
+
+        key = generate_dpop_keypair()
+
+        expired = Session(
+            did="did:plc:aaa",
+            handle="expired.bsky.social",
+            access_token="tok1",
+            refresh_token="",
+            dpop_key=key,
+            pds_endpoint="https://pds.example.com",
+            token_expiry=time.time() - 100,
+            auth_server_url="https://bsky.social/oauth/token",
+        )
+        expired.save()
+
+        valid = Session(
+            did="did:plc:bbb",
+            handle="valid.bsky.social",
+            access_token="tok2",
+            refresh_token="",
+            dpop_key=key,
+            pds_endpoint="https://pds.example.com",
+            token_expiry=time.time() + 3600,
+            auth_server_url="https://bsky.social/oauth/token",
+        )
+        valid.save()
+
+        selected = get_any_session()
+        assert selected is not None
+        assert selected.did == "did:plc:bbb"

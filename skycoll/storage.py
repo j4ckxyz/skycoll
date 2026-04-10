@@ -164,51 +164,54 @@ def read_dat(handle: str) -> dict:
     starter_packs: list[dict] = []
     backlinks: dict[str, dict[str, int]] = {}
 
-    with open(path, newline="") as f:
-        reader = csv.reader(f, delimiter="\t")
-        for i, row in enumerate(reader):
-            if i == 0:
-                profile = {
-                    "handle": row[0],
-                    "did": row[1],
-                    "displayName": row[2],
-                    "avatar": row[3],
-                    "description": row[4] if len(row) > 4 else "",
-                    "labels": row[5] if len(row) > 5 else "",
-                }
-            elif len(row) >= 2:
-                prefix = row[0]
-                if prefix == "F" and len(row) >= 3:
-                    follows.append({
-                        "handle": row[1],
-                        "did": row[2],
-                        "displayName": row[3] if len(row) > 3 else row[1],
-                        "avatar": row[4] if len(row) > 4 else "",
-                    })
-                elif prefix == "B" and len(row) >= 3:
-                    followers.append({
-                        "handle": row[1],
-                        "did": row[2],
-                        "displayName": row[3] if len(row) > 3 else row[1],
-                        "avatar": row[4] if len(row) > 4 else "",
-                    })
-                elif prefix == "L" and len(row) >= 3:
-                    lists.append({
-                        "uri": row[1],
-                        "name": row[2],
-                        "purpose": row[3] if len(row) > 3 else "",
-                    })
-                elif prefix == "S" and len(row) >= 3:
-                    starter_packs.append({
-                        "uri": row[1],
-                        "name": row[2],
-                        "item_count": int(row[3]) if len(row) > 3 and row[3].isdigit() else 0,
-                    })
-                elif prefix == "K" and len(row) >= 3:
-                    collection = row[1]
-                    path_key = row[2] if len(row) > 2 else ""
-                    count = int(row[3]) if len(row) > 3 and row[3].isdigit() else 0
-                    backlinks.setdefault(collection, {})[path_key] = count
+    try:
+        with open(path, newline="") as f:
+            reader = csv.reader(f, delimiter="\t")
+            for i, row in enumerate(reader):
+                if i == 0:
+                    profile = {
+                        "handle": row[0],
+                        "did": row[1],
+                        "displayName": row[2],
+                        "avatar": row[3],
+                        "description": row[4] if len(row) > 4 else "",
+                        "labels": row[5] if len(row) > 5 else "",
+                    }
+                elif len(row) >= 2:
+                    prefix = row[0]
+                    if prefix == "F" and len(row) >= 3:
+                        follows.append({
+                            "handle": row[1],
+                            "did": row[2],
+                            "displayName": row[3] if len(row) > 3 else row[1],
+                            "avatar": row[4] if len(row) > 4 else "",
+                        })
+                    elif prefix == "B" and len(row) >= 3:
+                        followers.append({
+                            "handle": row[1],
+                            "did": row[2],
+                            "displayName": row[3] if len(row) > 3 else row[1],
+                            "avatar": row[4] if len(row) > 4 else "",
+                        })
+                    elif prefix == "L" and len(row) >= 3:
+                        lists.append({
+                            "uri": row[1],
+                            "name": row[2],
+                            "purpose": row[3] if len(row) > 3 else "",
+                        })
+                    elif prefix == "S" and len(row) >= 3:
+                        starter_packs.append({
+                            "uri": row[1],
+                            "name": row[2],
+                            "item_count": int(row[3]) if len(row) > 3 and row[3].isdigit() else 0,
+                        })
+                    elif prefix == "K" and len(row) >= 3:
+                        collection = row[1]
+                        path_key = row[2] if len(row) > 2 else ""
+                        count = int(row[3]) if len(row) > 3 and row[3].isdigit() else 0
+                        backlinks.setdefault(collection, {})[path_key] = count
+    except FileNotFoundError:
+        raise FileNotFoundError(path)
 
     return {
         "profile": profile,

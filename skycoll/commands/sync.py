@@ -8,7 +8,8 @@ parsing is performed.
 from __future__ import annotations
 
 from skycoll.api import get_repo_car
-from skycoll.auth import get_authenticated_session
+from skycoll.auth import get_any_session
+from skycoll.resolve import resolve
 from skycoll.storage import write_car
 
 
@@ -18,11 +19,17 @@ def run(handle: str) -> None:
     Args:
         handle: The user's Bluesky handle.
     """
-    print(f"Authenticating as {handle} …")
-    session = get_authenticated_session(handle)
+    target = resolve(handle)
+    target_did = target["did"]
 
-    print(f"Downloading full repo CAR for {session.did} …")
-    car_bytes = get_repo_car(session, session.did)
+    session = get_any_session()
+    if session is None:
+        print("No cached OAuth session found. Run: skycoll init <your-handle>")
+        raise SystemExit(1)
+    print(f"Using cached session: {session.handle} ({session.did})")
+
+    print(f"Downloading full repo CAR for {target_did} …")
+    car_bytes = get_repo_car(session, target_did)
 
     path = write_car(handle, car_bytes)
     print(f"Wrote {len(car_bytes)} bytes → {path}")
