@@ -1,62 +1,37 @@
-"""posts sub-command — download posts via CAR repo sync, write .twt file.
+"""posts sub-command — download posts via getAuthorFeed, write .twt file.
 
-By default, uses ``com.atproto.sync.getRepo`` to download the full CAR and
-extracts all ``app.bsky.feed.post`` and ``app.bsky.feed.repost`` records.
-This removes any artificial post cap.
+By default, uses ``app.bsky.feed.getAuthorFeed`` with cursor-based pagination
+(no artificial cap — pages until the cursor is exhausted).
 
-Use ``--feed`` to fall back to the older ``app.bsky.feed.getAuthorFeed``
-paginated approach (limited to ~3000 items).
+Use ``--car`` to download the full repo CAR via ``com.atproto.sync.getRepo``
+and extract all post/repost/quote records.  This is slower but gives a
+complete archive including records the feed may not surface.
 """
 
 from __future__ import annotations
 
 from skycoll.api import get_repo_car, parse_car_records, get_author_feed
+from skycoll.appview import resolve_appview
 from skycoll.auth import get_authenticated_session
 from skycoll.storage import write_twt
 
 
-def run(handle: str, use_feed: bool = False) -> None:
+def run(handle: str, use_car: bool = False, appview: str | None = None) -> None:
     """Download posts for *handle* and write ``<handle>.twt``.
 
     Args:
         handle: The user's Bluesky handle.
-        use_feed: If ``True``, use ``app.bsky.feed.getAuthorFeed`` instead
-            of CAR sync (limited to ~3000 items).
+        use_car: If ``True``, use CAR repo sync instead of feed pagination.
+        appview: Optional AppView name or DID (for ``atproto-proxy`` header).
     """
+    appview_did = resolve_appview(appview)
     print(f"Authenticating as {handle} …")
     session = get_authenticated_session(handle)
     did = session.did
 
-    if use_feed:
-        print("Fetching posts via getAuthorFeed (--feed mode) …")
-        posts = []
-        for item in get_author_feed(session, did):
-            feed_item = item.get("post", item)
-            value = feed_item.get("record", {})
-            collection = "app.bsky.feed.post"
-
-            # Detect reposts and quotes via feed-specific fields
-            reason = item.get("reason", {})
-            if reason.get("$type") == "app.bsky.feed.defs#ReasonRepost":
-                collection = "app.bsky.feed.repost"
-
-            embed = value.get("embed", {})
-            if embed.get("$type") == "app.bsky.embed.record":
-                collection = "quote"
-
-            uri = feed_item.get("uri", "")
-            posts.append({
-                "uri": uri,
-                "collection": collection,
-                "value": value,
-            })
-            if len(posts) % 500 == 0:
-                print(f"  {len(posts)} items …")
-
-        print(f"Total items fetched: {len(posts)}")
-    else:
-        print("Downloading full repo CAR …")
-        car_bytes = get_repo_car(session, did)
+    if use_car:
+        print("Downloading full repo CAR (--car mode) …")
+        car_bytes = get_repo_car(session, did, appview=appview_did)
         print(f"CAR downloaded ({len(car_bytes)} bytes), parsing records …")
 
         all_records = parse_car_records(car_bytes)
@@ -69,15 +44,39 @@ def run(handle: str, use_feed: bool = False) -> None:
                 "app.bsky.feed.repost",
             )
         ]
-        # Mark quote posts (posts that embed another post)
-        for post in posts:
-            if post["collection"] == "app.bsky.feed.post":
-                value = post.get("value", {})
-                embed = value.get("embed", {})
-                if embed.get("$type") == "app.bsky.embed.record":
-                    pass
 
         print(f"Post/repost records: {len(posts)}")
+    else:
+        print("Fetching posts via getAuthorFeed …")
+        posts = []
+        for item in get_author_feed(session, did, appview=appview_did):
+            feed_item = item.get("post", item)
+            value = feed_item.get("record", {})
+            collection = "app.bsky.feed.post"
+
+            reason = item.get("reason", {})
+            if reason.get("$type") == "app.bsky.feed.defs#ReasonRepost":
+                collection = "app.bsky.feed.repost"
+
+            embed = value.get("embed", {})
+            if embed.get("$type") == "app.bsky.embed.record":
+                collection = "quote"
+
+            uri = feed_item.get("uri", "")
+            # Expand replies
+            reply = value.get("reply", {})
+            reply_to_uri = reply.get("parent", {}).get("uri", "") if reply else ""
+            root_uri = reply.get("root", {}).get("uri", "") if reply else ""
+
+            posts.append({
+                "uri": uri,
+                "collection": collection,
+                "value": value,
+            })
+            if len(posts) % 500 == 0:
+                print(f"  {len(posts)} items …")
+
+        print(f"Total items fetched: {len(posts)}")
 
     path = write_twt(handle, posts)
     print(f"Wrote {len(posts)} records → {path}")

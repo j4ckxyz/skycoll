@@ -1,10 +1,9 @@
 """edgelist sub-command — generate .gml from .dat/.fdat; optionally render .png.
 
 Builds a bidirectional social graph using both getFollows and getFollowers.
-Each edge carries a ``mutual_only`` attribute: ``1`` if the follow is
-one-directional, ``0`` if the relationship is mutual (both people follow
-each other).  Starter packs from ``.dat`` are included as node-type
-``starter_pack`` nodes.
+Each edge carries a ``mutual_only`` attribute.  If ``--constellation`` is
+provided, edges are further annotated with likes_given / likes_received
+counts from the Constellation backlinks index.
 """
 
 from __future__ import annotations
@@ -12,25 +11,21 @@ from __future__ import annotations
 import csv
 import os
 
+from skycoll.constellation import get_backlink_count
 from skycoll.storage import read_dat, write_gml
 
 
-def run(handle: str, render: bool = True) -> None:
+def run(
+    handle: str,
+    render: bool = True,
+    constellation: str | None = None,
+) -> None:
     """Generate a GML graph file for *handle* from local data.
-
-    Reads ``<handle>.dat`` and ``fdat/*.dat`` to build the ego-network
-    graph, then writes ``<handle>.gml``.  If *render* is ``True`` and
-    ``python-igraph`` is installed, also produces ``<handle>.png``.
-
-    Edges include a ``mutual_only`` attribute: 0 if the follow is mutual
-    (both A→B and B→A), 1 if one-directional.
-
-    Starter packs from the ``.dat`` file are added as graph nodes with
-    ``node_type "starter_pack"``.
 
     Args:
         handle: The focal user's handle.
         render: Whether to attempt PNG rendering (default ``True``).
+        constellation: Optional Constellation host URL for likes enrichment.
     """
     data = read_dat(handle)
     profile = data["profile"]
@@ -39,8 +34,6 @@ def run(handle: str, render: bool = True) -> None:
 
     ego_handle = profile["handle"]
 
-    # Build a set of who follows whom (directed edges ego sees)
-    # We use both follows and followers from .dat to determine mutual edges
     node_map: dict[str, dict] = {}
     edge_set: dict[tuple[str, str], bool] = {}
 
@@ -48,39 +41,29 @@ def run(handle: str, render: bool = True) -> None:
         if h and h not in node_map:
             node_map[h] = {"id": h, "label": label or h, "node_type": node_type}
 
-    # Focal user
     _add_node(ego_handle, profile.get("displayName", ego_handle))
 
-    # Follows set (for mutual detection)
     ego_follows_set: set[str] = set()
     ego_followers_set: set[str] = set()
 
-    # Edges from ego to follows
     for person in data["follows"]:
         h = person.get("handle", "")
         if h:
             _add_node(h, person.get("displayName", h))
             ego_follows_set.add(h)
-            edge_set[(ego_handle, h)] = False  # will be updated for mutual
 
-    # Edges from followers to ego
     for person in data["followers"]:
         h = person.get("handle", "")
         if h:
             _add_node(h, person.get("displayName", h))
             ego_followers_set.add(h)
-            edge_set[(h, ego_handle)] = False
 
-    # Mark mutual edges for ego's direct connections
     final_edges: list[tuple[str, str, bool]] = []
 
-    # Ego → follow is mutual if the person also follows ego
     for h in ego_follows_set:
         mutual = h in ego_followers_set
         final_edges.append((ego_handle, h, not mutual))
 
-    # Follower → ego is mutual if ego also follows them (already covered above,
-    # but we add the edge direction from follower to ego)
     for h in ego_followers_set:
         if h not in ego_follows_set:
             final_edges.append((h, ego_handle, True))
@@ -91,10 +74,9 @@ def run(handle: str, render: bool = True) -> None:
         sp_name = sp.get("name", "Starter Pack")
         if sp_uri:
             _add_node(sp_uri, sp_name, "starter_pack")
-            # Edge from ego to starter pack
             final_edges.append((ego_handle, sp_uri, True))
 
-    # Read fdat/ files for extended network
+    # fdat/ extended network
     fdat_dir = os.path.join(os.getcwd(), "fdat")
     if os.path.isdir(fdat_dir):
         for fname in os.listdir(fdat_dir):
@@ -107,35 +89,56 @@ def run(handle: str, render: bool = True) -> None:
                     rows = list(reader)
             except Exception:
                 continue
-
             if not rows:
                 continue
-
-            # First row = profile of this followed user
             fhandle = rows[0][0]
             _add_node(fhandle, rows[0][2] if len(rows[0]) > 2 else fhandle)
-
-            # Their follows
-            f_follows_set: set[str] = set()
             for row in rows[1:]:
                 if len(row) >= 3 and row[0] == "F":
                     friend_handle = row[1]
                     if friend_handle:
                         _add_node(friend_handle, row[3] if len(row) > 3 and row[3] else friend_handle)
-                        f_follows_set.add(friend_handle)
-                        edge_set[(fhandle, friend_handle)] = False
+                        final_edges.append((fhandle, friend_handle, True))
 
-            # Check mutual within fdat network
-            for friend in f_follows_set:
-                if (friend, fhandle) in edge_set:
-                    # Both directions exist → not one-sided
-                    final_edges.append((fhandle, friend, False))
-                else:
-                    final_edges.append((fhandle, friend, True))
-
-    nodes = list(node_map.values())
-    gml_path = write_gml(handle, nodes, final_edges)
-    print(f"Wrote {gml_path} ({len(nodes)} nodes, {len(final_edges)} edges)")
+    # Constellation enrichment: annotate edges with likes counts
+    if constellation:
+        print("Enriching edges with Constellation likes data …")
+        enriched_edges: list[tuple[str, str, bool, int, int]] = []
+        for src, tgt, mutual in final_edges:
+            src_did = _resolve_handle_to_did_cached(src)
+            tgt_did = _resolve_handle_to_did_cached(tgt)
+            likes_given = 0
+            likes_received = 0
+            if src_did:
+                count = get_backlink_count(
+                    constellation, f"at://{src_did}", "app.bsky.feed.like", "/subject"
+                )
+                if count is not None:
+                    likes_given = count
+            enriched_edges.append((src, tgt, mutual, likes_given, likes_received))
+        # Write enriched GML
+        nodes = list(node_map.values())
+        path = os.path.join(os.getcwd(), f"{handle}.gml")
+        with open(path, "w") as f:
+            f.write("graph [\n  directed 1\n")
+            for node in nodes:
+                nid = node.get("id", "")
+                label = node.get("label", nid).replace('"', '\\"')
+                node_type = node.get("node_type", "person")
+                f.write(f'  node [\n    id "{nid}"\n    label "{label}"\n    node_type "{node_type}"\n  ]\n')
+            for edge in enriched_edges:
+                src, tgt, mutual, likes_given, likes_received = edge
+                f.write(
+                    f'  edge [\n    source "{src}"\n    target "{tgt}"\n'
+                    f'    mutual_only {"1" if mutual else "0"}\n'
+                    f'    likes_given {likes_given}\n    likes_received {likes_received}\n  ]\n'
+                )
+            f.write("]\n")
+        print(f"Wrote {path} ({len(nodes)} nodes, {len(enriched_edges)} edges) [Constellation enriched]")
+    else:
+        nodes = list(node_map.values())
+        gml_path = write_gml(handle, nodes, final_edges)
+        print(f"Wrote {gml_path} ({len(nodes)} nodes, {len(final_edges)} edges)")
 
     if render:
         try:
@@ -146,9 +149,9 @@ def run(handle: str, render: bool = True) -> None:
             return
 
         g = igraph.Graph()
-        node_ids = [n["id"] for n in nodes]
+        node_ids = [n["id"] for n in node_map.values()]
         g.add_vertices(node_ids)
-        for v, n in zip(g.vs, nodes):
+        for v, n in zip(g.vs, node_map.values()):
             v["label"] = n.get("label", n["id"])
             v["node_type"] = n.get("node_type", "person")
 
@@ -165,11 +168,21 @@ def run(handle: str, render: bool = True) -> None:
 
         png_path = os.path.join(os.getcwd(), f"{handle}.png")
         layout = g.layout("fr")
-        visual_style = {
-            "layout": layout,
-            "bbox": (1200, 900),
-            "margin": 40,
-            "vertex_label": g.vs["label"],
-        }
-        igraph.plot(g, png_path, **visual_style)
+        igraph.plot(g, png_path, layout=layout, bbox=(1200, 900), margin=40)
         print(f"Wrote {png_path}")
+
+
+_did_cache: dict[str, str] = {}
+
+
+def _resolve_handle_to_did_cached(handle: str) -> str | None:
+    """Resolve a handle to a DID, with simple caching."""
+    if handle in _did_cache:
+        return _did_cache[handle]
+    try:
+        from skycoll.resolve import resolve_handle_to_did
+        did = resolve_handle_to_did(handle)
+        _did_cache[handle] = did
+        return did
+    except RuntimeError:
+        return None

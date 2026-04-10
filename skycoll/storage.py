@@ -52,11 +52,12 @@ def write_dat(
     followers: list[dict],
     lists: Optional[list[dict]] = None,
     starter_packs: Optional[list[dict]] = None,
+    backlinks: Optional[dict] = None,
 ) -> str:
     """Write a ``.dat`` file for *handle*.
 
-    The header line stores the profile, followed by ``F``/``B``/``L``/``S`` prefixed
-    rows for follows, followers, lists, and starter packs respectively.
+    The header line stores the profile, followed by ``F``/``B``/``L``/``S``/``K`` prefixed
+    rows for follows, followers, lists, starter packs, and backlinks respectively.
 
     Args:
         handle: The user's handle (used as file name).
@@ -65,6 +66,7 @@ def write_dat(
         followers: List of follower dicts.
         lists: Optional list of list dicts (``L`` rows).
         starter_packs: Optional list of starter-pack dicts (``S`` rows).
+        backlinks: Optional backlink counts dict from Constellation (``K`` rows).
 
     Returns:
         Path to the written file.
@@ -133,6 +135,18 @@ def write_dat(
                 sp.get("name", sp.get("record", {}).get("name", "")),
                 str(sp.get("listItemCount", sp.get("listItemCount", 0))),
             ])
+        if backlinks and isinstance(backlinks, dict):
+            for collection, paths in backlinks.items():
+                if isinstance(paths, dict):
+                    for path_key, count in paths.items():
+                        writer.writerow([
+                            "K",
+                            collection,
+                            path_key,
+                            str(count) if count is not None else "0",
+                        ])
+                elif isinstance(paths, (int, float)):
+                    writer.writerow(["K", collection, "", str(int(paths))])
     return path
 
 
@@ -140,7 +154,7 @@ def read_dat(handle: str) -> dict:
     """Read a ``.dat`` file for *handle*.
 
     Returns:
-        Dict with keys ``profile``, ``follows``, ``followers``, ``lists``, ``starter_packs``.
+        Dict with keys ``profile``, ``follows``, ``followers``, ``lists``, ``starter_packs``, ``backlinks``.
     """
     path = os.path.join(_base_dir(), f"{handle}.dat")
     profile: Optional[dict] = None
@@ -148,6 +162,7 @@ def read_dat(handle: str) -> dict:
     followers: list[dict] = []
     lists: list[dict] = []
     starter_packs: list[dict] = []
+    backlinks: dict[str, dict[str, int]] = {}
 
     with open(path, newline="") as f:
         reader = csv.reader(f, delimiter="\t")
@@ -189,6 +204,11 @@ def read_dat(handle: str) -> dict:
                         "name": row[2],
                         "item_count": int(row[3]) if len(row) > 3 and row[3].isdigit() else 0,
                     })
+                elif prefix == "K" and len(row) >= 3:
+                    collection = row[1]
+                    path_key = row[2] if len(row) > 2 else ""
+                    count = int(row[3]) if len(row) > 3 and row[3].isdigit() else 0
+                    backlinks.setdefault(collection, {})[path_key] = count
 
     return {
         "profile": profile,
@@ -196,6 +216,7 @@ def read_dat(handle: str) -> dict:
         "followers": followers,
         "lists": lists,
         "starter_packs": starter_packs,
+        "backlinks": backlinks,
     }
 
 

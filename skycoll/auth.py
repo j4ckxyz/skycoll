@@ -616,6 +616,7 @@ def make_authenticated_request(
     session: Session,
     method: str,
     path: str,
+    appview: Optional[str] = None,
     **kwargs,
 ) -> httpx.Response:
     """Make an authenticated request to the user's PDS with DPoP.
@@ -624,6 +625,7 @@ def make_authenticated_request(
         session: An active session.
         method: HTTP method (``GET``, ``POST``, etc.).
         path: XRPC path or relative URL on the PDS (e.g. ``/xrpc/com.atproto.identity.resolveHandle``).
+        appview: Optional AppView service DID for the ``atproto-proxy`` header.
         **kwargs: Additional keyword arguments forwarded to :func:`httpx.request`.
 
     Returns:
@@ -645,6 +647,8 @@ def make_authenticated_request(
         headers = dict(kwargs.pop("headers", {}))
         headers["Authorization"] = f"DPoP {session.access_token}"
         headers["DPoP"] = proof
+        if appview:
+            headers["atproto-proxy"] = appview
 
         resp = httpx.request(method, url, headers=headers, timeout=30, **kwargs)
 

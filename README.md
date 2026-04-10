@@ -6,12 +6,6 @@ It resolves identities, fetches social graphs, downloads posts and likes via CAR
 
 ## Installation
 
-### From PyPI (once published)
-
-```bash
-pip install skycoll
-```
-
 ### From source
 
 ```bash
@@ -70,16 +64,46 @@ skycoll init j4ck.xyz --lists
 # Include self-labels and server-assigned labels
 skycoll init j4ck.xyz --labels
 
-# Both
-skycoll init j4ck.xyz --lists --labels
+# Route through the Blacksky AppView
+skycoll init j4ck.xyz --appview blacksky
+
+# Query a Constellation backlinks index
+skycoll init j4ck.xyz --constellation https://constellation.example.com
+
+# All flags combined
+skycoll init j4ck.xyz --lists --labels --appview blacksky --constellation https://constellation.example.com
 ```
 
-The `.dat` file now includes:
-- Profile row with labels column
+The `.dat` file includes:
+- Profile header row with labels column
 - `F` rows for follows
 - `B` rows for followers
 - `L` rows for lists (with `--lists`)
 - `S` rows for starter packs
+- `K` rows for Constellation backlink counts (with `--constellation`)
+
+### `appview` flag
+
+Several commands accept `--appview` to route API requests through a specific Bluesky-compatible AppView. This sets the `atproto-proxy` HTTP header to a service DID, rather than hardcoding a base URL.
+
+Built-in names:
+| Name | Service DID | Description |
+|---|---|---|
+| `bluesky` | `did:web:api.bsky.app#bsky_appview` | Bluesky official AppView (default) |
+| `blacksky` | `did:web:api.blacksky.community#bsky_appview` | Blacksky community AppView |
+
+You can also pass a raw DID+fragment string for custom AppViews:
+```bash
+skycoll init j4ck.xyz --appview did:web:custom.example#bsky_appview
+```
+
+### `appviews`
+
+List the built-in AppView names and their service DIDs:
+
+```bash
+skycoll appviews
+```
 
 ### `fetch`
 
@@ -91,25 +115,26 @@ skycoll fetch j4ck.xyz
 
 ### `posts`
 
-Download all posts from the user's AT Protocol repository via **CAR sync** (no artificial cap). Writes `<handle>.twt` with columns:
+Download posts using paginated `getAuthorFeed` (default, no cap — pages until cursor is exhausted):
 
+```bash
+skycoll posts j4ck.xyz
 ```
-type    uri    timestamp    reply_to_uri    root_uri    text
+
+Use `--car` for full CAR repo sync (slower but gives a complete archive including all record types):
+
+```bash
+skycoll posts j4ck.xyz --car
 ```
+
+Rich `.twt` format columns: `type uri timestamp reply_to_uri root_uri text`
 
 Where `type` is `post`, `repost`, or `quote`.
 
+Route through an alternative AppView:
 ```bash
-# CAR sync (default, unlimited posts)
-skycoll posts j4ck.xyz
-
-# Legacy feed-based approach (limited to ~3000 items)
-skycoll posts j4ck.xyz --feed
+skycoll posts j4ck.xyz --appview blacksky
 ```
-
-**CAR sync approach:** Uses `com.atproto.sync.getRepo` to download the entire repository as a CAR (Content Addressable aRchive) file. This contains every record the user has ever created — posts, reposts, likes, follows, and more. The tool parses the CAR, extracts `app.bsky.feed.post` and `app.bsky.feed.repost` records, and writes them to the `.twt` file. Because this is a one-shot download rather than paginated API calls, there's no limit on the number of posts.
-
-**Feed approach (`--feed`):** Uses `app.bsky.feed.getAuthorFeed` with cursor-based pagination. This includes reposts and quote posts in a single feed but is capped at approximately 3000 items by the API. Use this only if CAR sync doesn't work for your PDS.
 
 ### `likes`
 
@@ -119,35 +144,31 @@ Download all likes. Writes `<handle>.fav` (tab-separated: `uri timestamp author_
 skycoll likes j4ck.xyz
 ```
 
-**Purge** (deletes all likes — the only write operation):
-
+Purge (delete all likes — the only write operation):
 ```bash
 skycoll likes j4ck.xyz --purge
 ```
 
 ### `threads`
 
-Reconstruct reply threads from an existing `<handle>.twt` file. Uses the `reply_to_uri` and `root_uri` fields to build thread trees. Outputs `<handle>.threads` as a JSON array.
+Reconstruct reply threads from an existing `<handle>.twt` file. Uses the `reply_to_uri` and `root_uri` fields to build thread trees. Outputs `<handle>.threads` as JSON.
 
 ```bash
 skycoll threads j4ck.xyz
 ```
 
-This is possible reliably in AT Protocol because every reply contains both the parent URI and the thread root URI.
-
 ### `edgelist`
 
 Generate `<handle>.gml` from `.dat` and `fdat/` data. If `python-igraph` is installed, also renders a `<handle>.png` visualisation.
 
+The GML includes bidirectional edges, `mutual_only` attributes, and `node_type` attributes.
+
 ```bash
 skycoll edgelist j4ck.xyz
-```
 
-The GML now includes:
-- **Bidirectional edges** from both `getFollows` and `getFollowers`
-- **`mutual_only` edge attribute**: `0` if the follow is mutual (both directions), `1` if one-directional
-- **Starter packs as nodes** with `node_type "starter_pack"`
-- **`node_type` node attribute**: `"person"` or `"starter_pack"`
+# Enrich edges with likes counts from Constellation
+skycoll edgelist j4ck.xyz --constellation https://constellation.example.com
+```
 
 ### `sync`
 
@@ -157,17 +178,60 @@ Download the full repo CAR and write it to `<handle>.car` for archival. No parsi
 skycoll sync j4ck.xyz
 ```
 
+### `backlinks`
+
+Query a [Constellation](https://github.com/at-microcosm/microcosm-rs/tree/main/constellation) backlinks index and pretty-print the full backlink breakdown for a handle.
+
+Constellation is a self-hostable AT Protocol backlinks index. A public instance may be available; this feature is opt-in and the host must be provided explicitly.
+
+```bash
+skycoll backlinks j4ck.xyz --constellation https://constellation.example.com
+```
+
+### `plc`
+
+Fetch the full PLC directory operation log for a DID and write it to `<did>.plc` as JSON. This gives the complete identity history — handle changes, PDS migrations, key rotations.
+
+```bash
+skycoll plc did:plc:z72i7hdynmk6r22z27h6tvae
+
+# Also print a human-readable summary
+skycoll plc did:plc:z72i7hdynmk6r22z27h6tvae --audit
+```
+
+### `firehose`
+
+Connect to an AT Protocol relay WebSocket and stream repo events in real time. Filter by handle or DID, and optionally stop after N events.
+
+```bash
+# Stream all events from the default relay (wss://bsky.network)
+skycoll firehose
+
+# Filter by DID
+skycoll firehose --did did:plc:abc123
+
+# Filter by handle (resolved to DID automatically)
+skycoll firehose --handle j4ck.xyz
+
+# Use the Blacksky/atproto.africa relay
+skycoll firehose --relay wss://atproto.africa
+
+# Stop after 100 matching events
+skycoll firehose --handle j4ck.xyz --limit 100
+```
+
 ## File formats
 
 | File | Format |
 |------|--------|
-| `<handle>.dat` | Tab-separated: profile header + `F`/`B`/`L`/`S` prefixed rows |
+| `<handle>.dat` | Tab-separated: profile header + `F`/`B`/`L`/`S`/`K` prefixed rows |
 | `fdat/<handle>.dat` | Same format as `.dat`, one file per followed user |
 | `<handle>.twt` | Tab-separated: `type uri timestamp reply_to_uri root_uri text` |
 | `<handle>.fav` | Tab-separated: `uri timestamp author_did author_handle text` |
 | `<handle>.threads` | JSON array of thread trees (root + nested replies) |
 | `<handle>.gml` | Graph Modeling Language file with `mutual_only` and `node_type` |
 | `<handle>.car` | Raw CAR archive (binary) |
+| `<did>.plc` | PLC directory operation log (JSON) |
 | `img/<handle>` | Avatar image |
 
 ## Authentication details
@@ -179,6 +243,7 @@ skycoll sync j4ck.xyz
 - **Client metadata**: Served from the loopback server at `/client-metadata.json`
 - **Session storage**: `~/.skycoll/sessions/<did>.json` (mode `0600`)
 - **`sub` verification**: Token exchange verifies the `sub` claim matches the expected DID
+- **`atproto-proxy` header**: Routes requests through a specified AppView service DID
 
 ## PDS resolution
 

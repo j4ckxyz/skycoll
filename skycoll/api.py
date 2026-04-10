@@ -28,6 +28,7 @@ def _paginated_get(
     params: Optional[dict] = None,
     cursor_key: str = "cursor",
     collection_items_key: str = "records",
+    appview: Optional[str] = None,
 ) -> Generator[dict, None, None]:
     """Yield individual items from a paginated AT Protocol list endpoint.
 
@@ -43,6 +44,7 @@ def _paginated_get(
         params: Query parameters for the first request.
         cursor_key: The JSON key holding the next cursor (default ``"cursor"``).
         collection_items_key: The JSON key holding the list of items.
+        appview: Optional AppView service DID for the ``atproto-proxy`` header.
 
     Yields:
         Each item dict from the paginated responses.
@@ -52,7 +54,7 @@ def _paginated_get(
 
     while True:
         for attempt in range(max_retries + 1):
-            resp = make_authenticated_request(session, "GET", path, params=params)
+            resp = make_authenticated_request(session, "GET", path, params=params, appview=appview)
 
             if resp.status_code == 429:
                 if attempt == max_retries:
@@ -87,12 +89,13 @@ def _paginated_get(
 # ---------------------------------------------------------------------------
 
 
-def get_profile(session: Session, actor: str) -> dict:
+def get_profile(session: Session, actor: str, appview: Optional[str] = None) -> dict:
     """Fetch the profile (``app.bsky.actor.getProfile``) for *actor*.
 
     Args:
         session: Authenticated session.
         actor: A handle or DID.
+        appview: Optional AppView service DID for the ``atproto-proxy`` header.
 
     Returns:
         Profile record dict.
@@ -102,6 +105,7 @@ def get_profile(session: Session, actor: str) -> dict:
         "GET",
         "/xrpc/app.bsky.actor.getProfile",
         params={"actor": actor},
+        appview=appview,
     )
     if resp.status_code != 200:
         raise RuntimeError(
@@ -111,7 +115,7 @@ def get_profile(session: Session, actor: str) -> dict:
 
 
 def get_follows(
-    session: Session, actor: str
+    session: Session, actor: str, appview: Optional[str] = None
 ) -> Generator[dict, None, None]:
     """Yield follow-record items for *actor*.
 
@@ -120,6 +124,7 @@ def get_follows(
     Args:
         session: Authenticated session.
         actor: A handle or DID.
+        appview: Optional AppView service DID for the ``atproto-proxy`` header.
     """
     yield from _paginated_get(
         session,
@@ -127,11 +132,12 @@ def get_follows(
         params={"actor": actor, "limit": 100},
         cursor_key="cursor",
         collection_items_key="follows",
+        appview=appview,
     )
 
 
 def get_followers(
-    session: Session, actor: str
+    session: Session, actor: str, appview: Optional[str] = None
 ) -> Generator[dict, None, None]:
     """Yield follower-record items for *actor*.
 
@@ -140,6 +146,7 @@ def get_followers(
     Args:
         session: Authenticated session.
         actor: A handle or DID.
+        appview: Optional AppView service DID for the ``atproto-proxy`` header.
     """
     yield from _paginated_get(
         session,
@@ -147,15 +154,17 @@ def get_followers(
         params={"actor": actor, "limit": 100},
         cursor_key="cursor",
         collection_items_key="followers",
+        appview=appview,
     )
 
 
-def get_lists(session: Session, actor: str) -> Generator[dict, None, None]:
+def get_lists(session: Session, actor: str, appview: Optional[str] = None) -> Generator[dict, None, None]:
     """Yield list-view items for *actor* via ``app.bsky.graph.getLists``.
 
     Args:
         session: Authenticated session.
         actor: A handle or DID.
+        appview: Optional AppView service DID for the ``atproto-proxy`` header.
     """
     yield from _paginated_get(
         session,
@@ -163,15 +172,17 @@ def get_lists(session: Session, actor: str) -> Generator[dict, None, None]:
         params={"actor": actor, "limit": 50},
         cursor_key="cursor",
         collection_items_key="lists",
+        appview=appview,
     )
 
 
-def get_starter_packs(session: Session, actor: str) -> Generator[dict, None, None]:
+def get_starter_packs(session: Session, actor: str, appview: Optional[str] = None) -> Generator[dict, None, None]:
     """Yield starter-pack view items for *actor* via ``app.bsky.graph.getActorStarterPacks``.
 
     Args:
         session: Authenticated session.
         actor: A handle or DID.
+        appview: Optional AppView service DID for the ``atproto-proxy`` header.
     """
     yield from _paginated_get(
         session,
@@ -179,6 +190,7 @@ def get_starter_packs(session: Session, actor: str) -> Generator[dict, None, Non
         params={"actor": actor, "limit": 50},
         cursor_key="cursor",
         collection_items_key="starterPacks",
+        appview=appview,
     )
 
 
@@ -188,7 +200,7 @@ def get_starter_packs(session: Session, actor: str) -> Generator[dict, None, Non
 
 
 def get_posts(
-    session: Session, actor: str, limit: int = _MAX_POSTS
+    session: Session, actor: str, limit: int = _MAX_POSTS, appview: Optional[str] = None
 ) -> Generator[dict, None, None]:
     """Yield post records for *actor*, up to *limit* posts.
 
@@ -199,6 +211,7 @@ def get_posts(
         session: Authenticated session.
         actor: A handle or DID.
         limit: Maximum number of posts to yield (default 3000).
+        appview: Optional AppView service DID.
     """
     count = 0
     for record in _paginated_get(
@@ -211,6 +224,7 @@ def get_posts(
         },
         cursor_key="cursor",
         collection_items_key="records",
+        appview=appview,
     ):
         yield record
         count += 1
@@ -219,30 +233,25 @@ def get_posts(
 
 
 def get_author_feed(
-    session: Session, actor: str, limit: int = _MAX_POSTS
+    session: Session, actor: str, appview: Optional[str] = None
 ) -> Generator[dict, None, None]:
     """Yield feed-view items for *actor* via ``app.bsky.feed.getAuthorFeed``.
 
-    This is the older paginated approach that includes reposts and quotes
-    in a single feed.  Prefer ``get_repo`` + CAR parsing for unlimited data.
+    Paginates until the cursor is exhausted (no artificial cap).
 
     Args:
         session: Authenticated session.
         actor: A handle or DID.
-        limit: Maximum number of feed items to yield (default 3000).
+        appview: Optional AppView service DID.
     """
-    count = 0
-    for item in _paginated_get(
+    yield from _paginated_get(
         session,
         "/xrpc/app.bsky.feed.getAuthorFeed",
         params={"actor": actor, "limit": 100},
         cursor_key="cursor",
         collection_items_key="feed",
-    ):
-        yield item
-        count += 1
-        if count >= limit:
-            break
+        appview=appview,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +260,7 @@ def get_author_feed(
 
 
 def get_likes(
-    session: Session, actor: str
+    session: Session, actor: str, appview: Optional[str] = None
 ) -> Generator[dict, None, None]:
     """Yield like-record items for *actor*.
 
@@ -261,6 +270,7 @@ def get_likes(
     Args:
         session: Authenticated session.
         actor: A handle or DID.
+        appview: Optional AppView service DID.
     """
     yield from _paginated_get(
         session,
@@ -272,6 +282,7 @@ def get_likes(
         },
         cursor_key="cursor",
         collection_items_key="records",
+        appview=appview,
     )
 
 
@@ -308,7 +319,7 @@ def delete_like(session: Session, uri: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def get_repo_car(session: Session, did: str) -> bytes:
+def get_repo_car(session: Session, did: str, appview: Optional[str] = None) -> bytes:
     """Download the full CAR (Content Addressable aRchive) of a user's repo.
 
     Uses ``com.atproto.sync.getRepo`` to download the complete repository.
@@ -318,6 +329,7 @@ def get_repo_car(session: Session, did: str) -> bytes:
     Args:
         session: Authenticated session.
         did: The DID of the user whose repo to download.
+        appview: Optional AppView service DID for the ``atproto-proxy`` header.
 
     Returns:
         Raw CAR bytes.
@@ -332,6 +344,7 @@ def get_repo_car(session: Session, did: str) -> bytes:
             "GET",
             "/xrpc/com.atproto.sync.getRepo",
             params={"did": did},
+            appview=appview,
         )
         if resp.status_code == 429:
             wait = 2 ** attempt
