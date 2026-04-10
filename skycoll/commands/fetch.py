@@ -5,18 +5,23 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from skycoll.errors import NetworkError, NotFoundError, ParseError, RateLimitError, SkycollError
 from skycoll.output import info, ok, warn
-from skycoll.resolve import resolve
 from skycoll.storage import read_dat, write_fdat, avatar_path
 
 
 _MAX_WORKERS = 10
 _RATE_LIMIT_RETRIES = 5
 _REQUEST_TIMEOUT = 30
+_DEFAULT_APPVIEW_BASE = "https://api.bsky.app"
+_BUILTIN_APPVIEW_BASES = {
+    "bluesky": "https://api.bsky.app",
+    "blacksky": "https://api.blacksky.community",
+}
 
 
 async def _safe_info(lock: asyncio.Lock, message: str) -> None:
@@ -32,6 +37,36 @@ async def _safe_warn(lock: asyncio.Lock, message: str) -> None:
 def _xrpc_url(pds_endpoint: str, path: str) -> str:
     base = pds_endpoint.rstrip("/")
     return f"{base}{path}"
+
+
+def _normalize_appview_base(appview: str | None) -> str:
+    if not appview:
+        return _DEFAULT_APPVIEW_BASE
+
+    candidate = appview.strip()
+    if not candidate:
+        return _DEFAULT_APPVIEW_BASE
+
+    key = candidate.lower()
+    if key in _BUILTIN_APPVIEW_BASES:
+        return _BUILTIN_APPVIEW_BASES[key]
+
+    if key.startswith("did:web:"):
+        host = key[len("did:web:") :].split("#", 1)[0].strip()
+        if not host:
+            raise ParseError(f"invalid appview value: {appview}")
+        return f"https://{host.rstrip('/')}"
+
+    if key.startswith("http://") or key.startswith("https://"):
+        parsed = urlparse(candidate)
+        if not parsed.netloc:
+            raise ParseError(f"invalid appview URL: {appview}")
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+
+    if "." in key:
+        return f"https://{candidate.rstrip('/')}"
+
+    raise ParseError(f"invalid appview value: {appview}")
 
 
 def _fdat_path(handle: str) -> str:
@@ -127,6 +162,7 @@ async def _worker(
     worker_id: int,
     queue: asyncio.Queue[tuple[int, dict] | None],
     total: int,
+    appview_base: str,
     client: httpx.AsyncClient,
     print_lock: asyncio.Lock,
     skip_existing: bool,
@@ -154,28 +190,10 @@ async def _worker(
                 )
                 continue
 
-            try:
-                identity = await asyncio.to_thread(resolve, friend_handle)
-            except SkycollError as exc:
-                await _safe_warn(
-                    print_lock,
-                    f"[{idx}/{total}] Resolve failed for {friend_handle}: {exc}",
-                )
-                continue
-
-            target_did = identity.get("did") if isinstance(identity, dict) else ""
-            target_pds = identity.get("pds") if isinstance(identity, dict) else ""
-            if not target_did:
-                target_did = friend_did or friend_handle
-            if not target_pds:
-                await _safe_warn(
-                    print_lock,
-                    f"[{idx}/{total}] Resolve failed for {friend_handle}: missing PDS endpoint",
-                )
-                continue
+            actor = friend_did or friend_handle
 
             try:
-                profile = await _fetch_profile(client, target_did, target_pds)
+                profile = await _fetch_profile(client, actor, appview_base)
             except SkycollError as exc:
                 await _safe_warn(
                     print_lock,
@@ -185,7 +203,7 @@ async def _worker(
 
             friend_follows: list[dict] = []
             try:
-                friend_follows = await _fetch_follows(client, target_did, target_pds)
+                friend_follows = await _fetch_follows(client, actor, appview_base)
             except SkycollError as exc:
                 await _safe_warn(
                     print_lock,
@@ -206,7 +224,12 @@ async def _worker(
             queue.task_done()
 
 
-async def _run_workers(follows: list[dict], workers: int, skip_existing: bool) -> None:
+async def _run_workers(
+    follows: list[dict],
+    workers: int,
+    skip_existing: bool,
+    appview_base: str,
+) -> None:
     queue: asyncio.Queue[tuple[int, dict] | None] = asyncio.Queue()
     total = len(follows)
     for idx, person in enumerate(follows, 1):
@@ -222,6 +245,7 @@ async def _run_workers(follows: list[dict], workers: int, skip_existing: bool) -
                     worker_id=worker_id,
                     queue=queue,
                     total=total,
+                    appview_base=appview_base,
                     client=client,
                     print_lock=print_lock,
                     skip_existing=skip_existing,
@@ -236,7 +260,12 @@ async def _run_workers(follows: list[dict], workers: int, skip_existing: bool) -
             raise result
 
 
-def run(handle: str, workers: int = 1, skip_existing: bool = True) -> None:
+def run(
+    handle: str,
+    workers: int = 1,
+    skip_existing: bool = True,
+    appview: str | None = None,
+) -> None:
     """Fetch the follows of every user listed in ``<handle>.dat``.
 
     Reads ``<handle>.dat``, iterates over every followed user, fetches
@@ -246,10 +275,12 @@ def run(handle: str, workers: int = 1, skip_existing: bool = True) -> None:
         handle: The focal user's handle (used to find ``<handle>.dat``).
         workers: Number of concurrent workers (1..10).
         skip_existing: Skip handles that already have ``fdat/<handle>.dat``.
+        appview: Optional AppView host/name. Defaults to ``https://api.bsky.app``.
     """
     try:
         if workers < 1 or workers > _MAX_WORKERS:
             raise ParseError(f"workers must be between 1 and {_MAX_WORKERS}")
+        appview_base = _normalize_appview_base(appview)
 
         try:
             data = read_dat(handle)
@@ -261,8 +292,8 @@ def run(handle: str, workers: int = 1, skip_existing: bool = True) -> None:
         follows = data.get("follows", [])
         if not isinstance(follows, list):
             raise ParseError(f"invalid .dat data for '{handle}': follows must be a list")
-        info(f"Fetching follows for {len(follows)} users …")
-        asyncio.run(_run_workers(follows, workers, skip_existing))
+        info(f"Fetching follows for {len(follows)} users via {appview_base} …")
+        asyncio.run(_run_workers(follows, workers, skip_existing, appview_base))
 
         ok("Done.")
     except SkycollError:

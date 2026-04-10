@@ -49,6 +49,11 @@ def main() -> None:
     p_fetch.add_argument("handle", help="The handle used in `skycoll init`")
     p_fetch.add_argument("--workers", type=int, default=1, help="Parallel workers for fetch (1-10)")
     p_fetch.add_argument(
+        "--appview",
+        default=None,
+        help="AppView host/name for public graph endpoints (default: api.bsky.app)",
+    )
+    p_fetch.add_argument(
         "--skip-existing",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -146,7 +151,12 @@ def main() -> None:
         elif args.command == "fetch":
             from skycoll.commands.fetch import run
 
-            run(args.handle, workers=args.workers, skip_existing=args.skip_existing)
+            run(
+                args.handle,
+                workers=args.workers,
+                skip_existing=args.skip_existing,
+                appview=args.appview,
+            )
 
         elif args.command == "posts":
             from skycoll.commands.posts import run

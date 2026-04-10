@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from skycoll.commands.fetch import _request_json_with_backoff
+from skycoll.commands.fetch import _normalize_appview_base, _request_json_with_backoff
 from skycoll.errors import RateLimitError
 
 
@@ -61,17 +61,8 @@ def test_request_json_with_backoff_raises_after_retry_limit(monkeypatch):
 def test_worker_resolves_each_handle_pds(monkeypatch):
     from skycoll.commands import fetch as fetch_mod
 
-    resolved: list[str] = []
     profile_calls: list[tuple[str, str]] = []
     follows_calls: list[tuple[str, str]] = []
-
-    def _fake_resolve(handle: str) -> dict:
-        resolved.append(handle)
-        return {
-            "did": f"did:plc:{handle}",
-            "handle": handle,
-            "pds": f"https://{handle}.pds.example.com",
-        }
 
     async def _fake_fetch_profile(client, actor: str, pds_endpoint: str) -> dict:
         del client
@@ -83,7 +74,6 @@ def test_worker_resolves_each_handle_pds(monkeypatch):
         follows_calls.append((actor, pds_endpoint))
         return []
 
-    monkeypatch.setattr(fetch_mod, "resolve", _fake_resolve)
     monkeypatch.setattr(fetch_mod, "_fetch_profile", _fake_fetch_profile)
     monkeypatch.setattr(fetch_mod, "_fetch_follows", _fake_fetch_follows)
     monkeypatch.setattr(fetch_mod, "write_fdat", lambda handle, profile, follows: f"/tmp/{handle}.dat")
@@ -95,25 +85,16 @@ def test_worker_resolves_each_handle_pds(monkeypatch):
         {"handle": "bob.bsky.social", "did": "did:plc:bob"},
     ]
 
-    asyncio.run(fetch_mod._run_workers(follows, workers=2, skip_existing=True))
+    asyncio.run(fetch_mod._run_workers(follows, workers=2, skip_existing=True, appview_base="https://api.bsky.app"))
 
-    assert sorted(resolved) == ["alice.bsky.social", "bob.bsky.social"]
-    assert ("did:plc:alice.bsky.social", "https://alice.bsky.social.pds.example.com") in profile_calls
-    assert ("did:plc:bob.bsky.social", "https://bob.bsky.social.pds.example.com") in profile_calls
-    assert ("did:plc:alice.bsky.social", "https://alice.bsky.social.pds.example.com") in follows_calls
-    assert ("did:plc:bob.bsky.social", "https://bob.bsky.social.pds.example.com") in follows_calls
+    assert ("did:plc:alice", "https://api.bsky.app") in profile_calls
+    assert ("did:plc:bob", "https://api.bsky.app") in profile_calls
+    assert ("did:plc:alice", "https://api.bsky.app") in follows_calls
+    assert ("did:plc:bob", "https://api.bsky.app") in follows_calls
 
 
 def test_worker_skip_existing_short_circuit(monkeypatch):
     from skycoll.commands import fetch as fetch_mod
-
-    resolved: list[str] = []
-
-    def _fake_resolve(handle: str) -> dict:
-        resolved.append(handle)
-        return {"did": "did:plc:x", "handle": handle, "pds": "https://x.example.com"}
-
-    monkeypatch.setattr(fetch_mod, "resolve", _fake_resolve)
     monkeypatch.setattr(fetch_mod, "_fdat_exists", lambda _handle: True)
 
     async def _should_not_run(*args, **kwargs):
@@ -123,5 +104,17 @@ def test_worker_skip_existing_short_circuit(monkeypatch):
     monkeypatch.setattr(fetch_mod, "_fetch_follows", _should_not_run)
 
     follows = [{"handle": "alice.bsky.social", "did": "did:plc:alice"}]
-    asyncio.run(fetch_mod._run_workers(follows, workers=1, skip_existing=True))
-    assert resolved == []
+    asyncio.run(fetch_mod._run_workers(follows, workers=1, skip_existing=True, appview_base="https://api.bsky.app"))
+
+
+def test_normalize_appview_base_variants():
+    assert _normalize_appview_base(None) == "https://api.bsky.app"
+    assert _normalize_appview_base("bluesky") == "https://api.bsky.app"
+    assert _normalize_appview_base("blacksky") == "https://api.blacksky.community"
+    assert _normalize_appview_base("did:web:api.bsky.app#bsky_appview") == "https://api.bsky.app"
+    assert _normalize_appview_base("https://api.bsky.app") == "https://api.bsky.app"
+
+
+def test_normalize_appview_base_invalid():
+    with pytest.raises(Exception):
+        _normalize_appview_base("did:web:#bad")

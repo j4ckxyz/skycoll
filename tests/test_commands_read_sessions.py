@@ -23,12 +23,10 @@ class TestFetchCommand:
         assert "Run: skycoll init alice.bsky.social" in str(exc.value)
 
     @patch("skycoll.commands.fetch._run_workers", new_callable=AsyncMock)
-    @patch("skycoll.commands.fetch.resolve")
     @patch("skycoll.commands.fetch.read_dat")
     def test_fetch_uses_worker_pipeline(
         self,
         mock_read_dat,
-        mock_resolve,
         mock_run_workers,
     ):
         from skycoll.commands.fetch import run
@@ -36,17 +34,12 @@ class TestFetchCommand:
         mock_read_dat.return_value = {
             "follows": [{"handle": "bob.bsky.social", "did": "did:plc:bob"}],
         }
-        mock_resolve.return_value = {
-            "did": "did:plc:target",
-            "handle": "alice.bsky.social",
-            "pds": "https://pds.example.com",
-        }
-
         run("alice.bsky.social", workers=3, skip_existing=False)
         mock_run_workers.assert_awaited_once_with(
             [{"handle": "bob.bsky.social", "did": "did:plc:bob"}],
             3,
             False,
+            "https://api.bsky.app",
         )
 
     def test_fetch_rejects_invalid_worker_count(self):

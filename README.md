@@ -137,6 +137,9 @@ skycoll fetch j4ck.xyz
 # Parallel fetch with 5 workers (faster on large follow graphs)
 skycoll fetch j4ck.xyz --workers 5
 
+# Use an alternate AppView host for public profile/follows endpoints
+skycoll fetch j4ck.xyz --appview blacksky
+
 # Resume an interrupted fetch (default behavior)
 skycoll fetch j4ck.xyz --skip-existing
 
