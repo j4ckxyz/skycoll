@@ -31,7 +31,7 @@ The first time you run a command that requires authentication (`init`, `fetch`, 
 
 1. Resolve your handle to a DID and PDS endpoint.
 2. Discover the OAuth 2.0 authorisation server from your PDS.
-3. Start a temporary HTTP server on `127.0.0.1:<random-port>` to serve the client metadata document and receive the callback.
+3. Use localhost-development OAuth client mode (`client_id` on `http://localhost` with `redirect_uri` query parameter), and start a temporary HTTP server on `127.0.0.1:<random-port>` only to receive the callback.
 4. Open your browser for you to authorise the request (scopes: `atproto transition:generic`).
 5. Exchange the authorisation code using PKCE (S256) and bind it with DPoP (ES256).
 6. Save the session to `~/.skycoll/sessions/<did>.json` (mode `0600`).
@@ -263,7 +263,7 @@ skycoll firehose --handle j4ck.xyz --limit 100
 - **DPoP**: ES256 keypair; separate nonces for auth server vs PDS
 - **Scopes**: `atproto transition:generic`
 - **Client type**: Public/native — loopback redirect URI on a random port
-- **Client metadata**: Served from the loopback server at `/client-metadata.json`
+- **Client metadata mode**: Uses atproto localhost-development `client_id` (`http://localhost/?redirect_uri=...&scope=...`)
 - **Session storage**: `~/.skycoll/sessions/<did>.json` (mode `0600`)
 - **`sub` verification**: Token exchange verifies the `sub` claim matches the expected DID
 - **`atproto-proxy` header**: Routes requests through a specified AppView service DID

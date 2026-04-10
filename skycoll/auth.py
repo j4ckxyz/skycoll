@@ -398,65 +398,43 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         pass  # silence request logs
 
 
-def _client_metadata(client_id: str) -> dict:
-    """Build the AT Protocol native-client metadata document.
-
-    For public/native clients, the client ID must be a localhost URL that
-    serves this metadata document.
-    """
-    return {
-        "client_id": client_id,
-        "client_name": "skycoll",
-        "client_uri": "https://github.com/nickvdp/skycoll",
-        "redirect_uris": [client_id.replace("/client-metadata.json", "/callback")],
-        "scope": SCOPES,
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-        "application_type": "native",
-        "dpop_bound_access_tokens": True,
-    }
-
-
-class _MetadataHandler(BaseHTTPRequestHandler):
-    """Serves the client-metadata document on the loopback server."""
+class _LoopbackHandler(BaseHTTPRequestHandler):
+    """Loopback handler that only accepts OAuth callback requests."""
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path.endswith("/client-metadata.json"):
-            body = json.dumps(_client_metadata(self._client_id)).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            self.send_response(404)
-            self.end_headers()
+        if self.path.startswith("/callback"):
+            _CallbackHandler.do_GET(self)
+            return
+
+        body = b"Not found"
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format, *args):  # noqa: ANN001
         pass
 
 
-def _start_callback_server(port: int, client_id: str) -> HTTPServer:
-    """Start a loopback HTTP server on *port* that serves both
-    the client-metadata document and the OAuth callback."""
-    server = HTTPServer(("127.0.0.1", port), _MetadataHandler)
-    _MetadataHandler._client_id = client_id  # type: ignore[attr-defined]
-
-    # Wrap do_GET to also handle the callback path
-    original_handler = _MetadataHandler.do_GET
-
-    def _dispatch(self):  # type: ignore[no-untyped-def]
-        if self.path.startswith("/callback"):
-            _CallbackHandler.do_GET(self)
-        else:
-            original_handler(self)
-
-    _MetadataHandler.do_GET = _dispatch  # type: ignore[assignment]
-
+def _start_callback_server(port: int) -> HTTPServer:
+    """Start a loopback HTTP server on *port* for OAuth callbacks."""
+    server = HTTPServer(("127.0.0.1", port), _LoopbackHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
+
+def _build_localhost_client_id(redirect_uri: str, scope: str) -> str:
+    """Build a localhost-development client_id for atproto OAuth.
+
+    Per spec, localhost-development client_ids must use the origin
+    ``http://localhost`` (no explicit port), with optional query params.
+    We include redirect_uri and scope so auth servers can build virtual
+    client metadata without fetching from loopback addresses.
+    """
+    query = urlencode({"redirect_uri": redirect_uri, "scope": scope})
+    return f"http://localhost/?{query}"
 
 
 def _extract_nonce_from_response(resp: httpx.Response) -> Optional[str]:
@@ -554,11 +532,12 @@ def authenticate(handle: str) -> Session:
 
     # --- Loopback redirect URI ---
     port = secrets.randbelow(65535 - 49152) + 49152
-    client_id = f"http://127.0.0.1:{port}/client-metadata.json"
     redirect_uri = f"http://127.0.0.1:{port}/callback"
+    client_id = _build_localhost_client_id(redirect_uri, SCOPES)
+    vprint(f"oauth client_id={client_id}")
 
     # --- Start temporary server ---
-    server = _start_callback_server(port, client_id)
+    server = _start_callback_server(port)
     try:
         # --- PAR (Pushed Authorization Request) ---
         # AT Protocol requires PAR. If the auth server publishes a
@@ -617,7 +596,7 @@ def authenticate(handle: str) -> Session:
                     if new_nonce:
                         dpop_nonce = new_nonce
 
-            if resp.status_code != 200:
+            if resp.status_code not in (200, 201):
                 raise RuntimeError(
                     f"PAR request failed (HTTP {resp.status_code}): {resp.text}"
                 )

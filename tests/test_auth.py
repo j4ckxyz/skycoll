@@ -7,6 +7,7 @@ import os
 import stat
 import tempfile
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -21,6 +22,7 @@ from skycoll.auth import (
     discover_auth_server,
     _do_token_request,
     make_authenticated_request,
+    _build_localhost_client_id,
     _b64url,
 )
 
@@ -398,3 +400,23 @@ class TestAuthenticatedRequest:
         assert mock_request.call_count == 2
         assert session.dpop_nonce_pds == "nonce-pds-1"
         mock_save.assert_called()
+
+
+class TestLocalhostClientId:
+    """Test localhost-development client_id generation."""
+
+    def test_localhost_client_id_uses_required_origin(self):
+        """Client ID must use http://localhost origin with query params."""
+        redirect_uri = "http://127.0.0.1:54321/callback"
+        scope = "atproto transition:generic"
+
+        client_id = _build_localhost_client_id(redirect_uri, scope)
+        parsed = urlparse(client_id)
+
+        assert parsed.scheme == "http"
+        assert parsed.netloc == "localhost"
+        assert parsed.path == "/"
+
+        qs = parse_qs(parsed.query)
+        assert qs.get("redirect_uri") == [redirect_uri]
+        assert qs.get("scope") == [scope]
