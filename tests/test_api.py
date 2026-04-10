@@ -20,7 +20,8 @@ def _make_session() -> Session:
         refresh_token="test_refresh",
         dpop_key=key,
         pds_endpoint="https://bsky.social",
-        token_expiry=9999999999.0,
+        access_token_expiry=9999999999.0,
+        refresh_token_expiry=9999999999.0,
     )
 
 

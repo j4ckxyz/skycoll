@@ -66,6 +66,36 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
+def _b64url_decode(data: str) -> bytes:
+    """Decode base64url text with optional missing padding."""
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode((data + padding).encode("ascii"))
+
+
+def _jwt_expiry(token: str) -> float:
+    """Extract the ``exp`` claim from a JWT as a Unix timestamp.
+
+    Returns ``0.0`` if the token is empty, malformed, or does not contain
+    a numeric ``exp`` claim.
+    """
+    if not token or "." not in token:
+        return 0.0
+
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return 0.0
+        payload_raw = _b64url_decode(parts[1])
+        payload = json.loads(payload_raw.decode("utf-8"))
+        exp = payload.get("exp")
+        if isinstance(exp, (int, float)):
+            return float(exp)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 0.0
+
+    return 0.0
+
+
 def generate_dpop_keypair() -> ec.EllipticCurvePrivateKey:
     """Generate an ES256 (P-256) keypair for DPoP proofs."""
     return ec.generate_private_key(ec.SECP256R1())
@@ -286,7 +316,8 @@ class Session:
         dpop_nonce_as: DPoP nonce for the authorisation server.
         dpop_nonce_pds: DPoP nonce for the PDS / resource server.
         pds_endpoint: Origin of the user's PDS.
-        token_expiry: Unix timestamp when the access token expires.
+        access_token_expiry: Unix timestamp when the access token expires.
+        refresh_token_expiry: Unix timestamp when the refresh token expires.
         auth_server_url: The authorisation server URL (for refresh).
     """
 
@@ -300,6 +331,8 @@ class Session:
         dpop_nonce_as: Optional[str] = None,
         dpop_nonce_pds: Optional[str] = None,
         pds_endpoint: str = "",
+        access_token_expiry: float = 0.0,
+        refresh_token_expiry: float = 0.0,
         token_expiry: float = 0.0,
         auth_server_url: str = "",
     ) -> None:
@@ -311,7 +344,8 @@ class Session:
         self.dpop_nonce_as = dpop_nonce_as
         self.dpop_nonce_pds = dpop_nonce_pds
         self.pds_endpoint = pds_endpoint
-        self.token_expiry = token_expiry
+        self.access_token_expiry = access_token_expiry or token_expiry
+        self.refresh_token_expiry = refresh_token_expiry
         self.auth_server_url = auth_server_url
 
     # -- serialisation -------------------------------------------------------
@@ -324,6 +358,9 @@ class Session:
     def save(self) -> None:
         """Persist this session to disk (mode ``0600``)."""
         os.makedirs(SESSIONS_DIR, exist_ok=True)
+        refresh_expiry = self.refresh_token_expiry or _jwt_expiry(self.refresh_token)
+        if refresh_expiry > 0:
+            self.refresh_token_expiry = refresh_expiry
         data = {
             "did": self.did,
             "handle": self.handle,
@@ -333,7 +370,8 @@ class Session:
             "dpop_nonce_as": self.dpop_nonce_as,
             "dpop_nonce_pds": self.dpop_nonce_pds,
             "pds_endpoint": self.pds_endpoint,
-            "token_expiry": self.token_expiry,
+            "access_token_expiry": self.access_token_expiry,
+            "refresh_token_expiry": self.refresh_token_expiry,
             "auth_server_url": self.auth_server_url,
         }
         path = self._path()
@@ -354,6 +392,12 @@ class Session:
             return None
         with open(path) as f:
             data = json.load(f)
+        access_token_expiry = float(
+            data.get("access_token_expiry", data.get("token_expiry", 0.0)) or 0.0
+        )
+        refresh_token_expiry = float(data.get("refresh_token_expiry", 0.0) or 0.0)
+        if refresh_token_expiry <= 0:
+            refresh_token_expiry = _jwt_expiry(str(data.get("refresh_token", "")))
         return cls(
             did=data["did"],
             handle=data["handle"],
@@ -363,7 +407,8 @@ class Session:
             dpop_nonce_as=data.get("dpop_nonce_as"),
             dpop_nonce_pds=data.get("dpop_nonce_pds"),
             pds_endpoint=data.get("pds_endpoint", ""),
-            token_expiry=data.get("token_expiry", 0.0),
+            access_token_expiry=access_token_expiry,
+            refresh_token_expiry=refresh_token_expiry,
             auth_server_url=data.get("auth_server_url", ""),
         )
 
@@ -514,9 +559,10 @@ def authenticate(handle: str) -> Session:
 
     existing = Session.load(did)
     if existing is not None:
-        refreshed = _maybe_refresh(existing)
-        if refreshed:
-            return refreshed
+        try:
+            return _maybe_refresh(existing)
+        except AuthError:
+            vprint(f"cached session for {handle} is expired; continuing with fresh login")
 
     # --- PKCE ---
     code_verifier, code_challenge = generate_pkce()
@@ -686,7 +732,8 @@ def authenticate(handle: str) -> Session:
             dpop_nonce_as=dpop_nonce,
             dpop_nonce_pds=None,
             pds_endpoint=pds,
-            token_expiry=time.time() + token_data.get("expires_in", 3600),
+            access_token_expiry=time.time() + token_data.get("expires_in", 3600),
+            refresh_token_expiry=_jwt_expiry(token_data.get("refresh_token", "")),
             auth_server_url=token_url,
         )
         session.save()
@@ -696,55 +743,109 @@ def authenticate(handle: str) -> Session:
         server.shutdown()
 
 
-def _maybe_refresh(session: Session) -> Optional[Session]:
-    """Refresh the access token if it is about to expire.
+def _refresh_session(session: Session) -> Session:
+    """Refresh a session's access token using its refresh token.
 
-    Refreshes only when within 60 seconds of expiry. The DPoP proof is
-    attached to the refresh request as required by the spec.
+    Returns the updated session on success.
 
-    Returns:
-        The refreshed session, or ``None`` if no refresh was needed.
+    Raises:
+        AuthError: If the session cannot be refreshed (missing/invalid token,
+            revoked session, or protocol mismatch).
+        NetworkError: On transport-level failures while contacting the auth server.
+        ParseError: If the token endpoint returns malformed JSON.
     """
-    if time.time() < session.token_expiry - 60:
-        return session
-
     if not session.refresh_token:
-        return None
+        raise AuthError(
+            f"Session expired for {session.handle} — run: skycoll auth login {session.handle}."
+        )
 
     token_url = session.auth_server_url
+    if not token_url:
+        raise AuthError(
+            f"Session expired for {session.handle} — run: skycoll auth login {session.handle}."
+        )
+
     body = {
         "grant_type": "refresh_token",
         "refresh_token": session.refresh_token,
     }
 
-    proof = build_dpop_proof(
-        session.dpop_key,
-        "POST",
-        token_url,
-        nonce=session.dpop_nonce_as,
-    )
-    headers = {"DPoP": proof, "Content-Type": "application/x-www-form-urlencoded"}
-    resp = httpx.post(token_url, data=body, headers=headers, follow_redirects=True, timeout=30)
-    vprint(f"refresh token response status={resp.status_code}")
+    nonce = session.dpop_nonce_as
+    resp = None
+    for attempt in range(2):
+        proof = build_dpop_proof(
+            session.dpop_key,
+            "POST",
+            token_url,
+            nonce=nonce,
+        )
+        headers = {"DPoP": proof, "Content-Type": "application/x-www-form-urlencoded"}
 
-    new_nonce = _extract_nonce_from_response(resp)
-    if new_nonce:
-        session.dpop_nonce_as = new_nonce
+        try:
+            resp = httpx.post(token_url, data=body, headers=headers, follow_redirects=True, timeout=30)
+        except httpx.HTTPError as exc:
+            raise NetworkError(f"could not reach auth server token endpoint: {exc}") from exc
+        vprint(f"refresh token response status={resp.status_code}")
 
+        new_nonce = _extract_nonce_from_response(resp)
+        if new_nonce:
+            session.dpop_nonce_as = new_nonce
+
+        if resp.status_code == 400 and new_nonce and new_nonce != nonce and attempt == 0:
+            nonce = new_nonce
+            continue
+
+        break
+
+    if resp is None:
+        raise NetworkError(f"refresh token request failed for {session.handle}: no response")
+
+    if 400 <= resp.status_code < 500:
+        raise AuthError(
+            f"Session expired for {session.handle} — run: skycoll auth login {session.handle}."
+        )
     if resp.status_code != 200:
-        return None
+        raise NetworkError(
+            f"refresh token request failed for {session.handle}: HTTP {resp.status_code}"
+        )
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise ParseError(f"invalid refresh token JSON for {session.handle}") from exc
+
     returned_sub = data.get("sub", "")
     if returned_sub and returned_sub != session.did:
-        return None
+        raise AuthError(
+            f"Session expired for {session.handle} — run: skycoll auth login {session.handle}."
+        )
 
-    session.access_token = data["access_token"]
-    if data.get("refresh_token"):
-        session.refresh_token = data["refresh_token"]
-    session.token_expiry = time.time() + data.get("expires_in", 3600)
+    access_token = data.get("access_token", "")
+    if not access_token:
+        raise ParseError(f"refresh response missing access_token for {session.handle}")
+
+    session.access_token = access_token
+    maybe_refresh_token = data.get("refresh_token")
+    if maybe_refresh_token:
+        session.refresh_token = maybe_refresh_token
+
+    session.access_token_expiry = time.time() + data.get("expires_in", 3600)
+    parsed_refresh_expiry = _jwt_expiry(session.refresh_token)
+    if parsed_refresh_expiry > 0:
+        session.refresh_token_expiry = parsed_refresh_expiry
     session.save()
     return session
+
+
+def _maybe_refresh(session: Session) -> Session:
+    """Refresh the access token if needed and return a valid session.
+
+    Access tokens are proactively refreshed when they have <=60 seconds left.
+    """
+    if time.time() < session.access_token_expiry - 60:
+        return session
+
+    return _refresh_session(session)
 
 
 def get_authenticated_session(handle: str) -> Session:
@@ -761,9 +862,7 @@ def get_authenticated_session(handle: str) -> Session:
     identity = resolve(handle)
     existing = Session.load(identity["did"])
     if existing is not None:
-        refreshed = _maybe_refresh(existing)
-        if refreshed:
-            return refreshed
+        return _maybe_refresh(existing)
     # No valid session — kick off full flow
     return authenticate(handle)
 
@@ -771,7 +870,7 @@ def get_authenticated_session(handle: str) -> Session:
 def get_any_session() -> Optional[Session]:
     """Return the first valid cached session from ``~/.skycoll/sessions``.
 
-    Sessions are scanned from disk and the first non-expired (or refreshable)
+    Sessions are scanned from disk and the first valid (or silently refreshed)
     session is returned. This is intended for read-only commands where any
     authenticated account can be used to read public data.
 
@@ -797,11 +896,15 @@ def get_any_session() -> Optional[Session]:
             if session is None:
                 continue
 
-            refreshed = _maybe_refresh(session)
-            if refreshed is not None:
-                vprint(f"using cached session for {refreshed.handle} ({refreshed.did})")
-                return refreshed
-        except Exception as exc:
+            try:
+                refreshed = _maybe_refresh(session)
+            except AuthError as exc:
+                vprint(f"skipping expired session {session.handle} ({session.did}): {exc}")
+                continue
+
+            vprint(f"using cached session for {refreshed.handle} ({refreshed.did})")
+            return refreshed
+        except (OSError, ValueError, TypeError, ParseError) as exc:
             vprint(f"skipping invalid session file {path}: {exc}")
             continue
 
@@ -833,12 +936,11 @@ def logout(handle: str) -> tuple[str, str]:
 
 
 def list_saved_sessions() -> list[dict]:
-    """List saved sessions from disk with validity metadata."""
+    """List saved sessions from disk with refresh-aware validity metadata."""
     if not os.path.isdir(SESSIONS_DIR):
         return []
 
     out: list[dict] = []
-    now = time.time()
     for entry in sorted(os.listdir(SESSIONS_DIR)):
         if not entry.endswith(".json"):
             continue
@@ -846,18 +948,47 @@ def list_saved_sessions() -> list[dict]:
         try:
             with open(path) as f:
                 data = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ParseError(f"invalid session file {path}: {exc}") from exc
+            did = data.get("did", "")
+            if not did:
+                raise ParseError(f"missing did in session file {path}")
+            session = Session.load(did)
+            if session is None:
+                continue
 
-        expiry = float(data.get("token_expiry", 0.0) or 0.0)
-        out.append(
-            {
-                "handle": data.get("handle", ""),
-                "did": data.get("did", ""),
-                "token_expiry": expiry,
-                "is_valid": expiry > now,
-            }
-        )
+            refreshed = False
+            access_expired = time.time() >= session.access_token_expiry
+            status = "valid"
+            dead_reason = ""
+
+            if access_expired:
+                try:
+                    session = _refresh_session(session)
+                    refreshed = True
+                except AuthError as exc:
+                    status = "dead"
+                    dead_reason = str(exc)
+                except (NetworkError, ParseError):
+                    # Keep session visible; refresh can be retried later.
+                    if access_expired:
+                        status = "access_expired"
+
+            refresh_delta = session.refresh_token_expiry - time.time()
+            out.append(
+                {
+                    "handle": session.handle,
+                    "did": session.did,
+                    "access_token_expiry": float(session.access_token_expiry or 0.0),
+                    "refresh_token_expiry": float(session.refresh_token_expiry or 0.0),
+                    "refresh_token_expires_in": refresh_delta,
+                    "access_token_expired": access_expired,
+                    "refreshed": refreshed,
+                    "status": status,
+                    "is_valid": status == "valid",
+                    "error": dead_reason,
+                }
+            )
+        except (OSError, json.JSONDecodeError, ParseError, ValueError, TypeError) as exc:
+            raise ParseError(f"invalid session file {path}: {exc}") from exc
 
     return out
 
@@ -884,6 +1015,7 @@ def make_authenticated_request(
     Raises:
         RuntimeError: If the request fails after retries (including 429).
     """
+    session = _maybe_refresh(session)
     url = path if path.startswith("http") else f"{session.pds_endpoint}{path}"
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
@@ -923,11 +1055,13 @@ def make_authenticated_request(
             continue
 
         if resp.status_code == 401:
-            # Access token might have expired mid-session — try refresh
-            refreshed = _maybe_refresh(session)
-            if refreshed:
-                session = refreshed
+            # First retry with server-provided PDS DPoP nonce if present.
+            if new_nonce:
                 continue
+
+            # Otherwise access token might be expired/revoked; refresh once.
+            session = _refresh_session(session)
+            continue
 
         return resp
 

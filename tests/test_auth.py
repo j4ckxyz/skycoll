@@ -27,9 +27,12 @@ from skycoll.auth import (
     get_any_session,
     list_saved_sessions,
     logout,
+    _jwt_expiry,
+    _maybe_refresh,
+    _refresh_session,
     _b64url,
 )
-from skycoll.errors import NotFoundError
+from skycoll.errors import AuthError, NotFoundError
 
 
 def _mock_response(status_code=200, json_data=None, text="", headers=None):
@@ -175,7 +178,8 @@ class TestSessionFilePermissions:
             refresh_token="test_refresh",
             dpop_key=key,
             pds_endpoint="https://bsky.social",
-            token_expiry=9999999999.0,
+            access_token_expiry=9999999999.0,
+            refresh_token_expiry=9999999999.0,
         )
         session.save()
 
@@ -199,7 +203,8 @@ class TestSessionFilePermissions:
             dpop_nonce_as="nonce_as",
             dpop_nonce_pds="nonce_pds",
             pds_endpoint="https://pds.example.com",
-            token_expiry=1234567890.0,
+            access_token_expiry=1234567890.0,
+            refresh_token_expiry=2234567890.0,
             auth_server_url="https://auth.example.com/token",
         )
         session.save()
@@ -213,6 +218,8 @@ class TestSessionFilePermissions:
         assert loaded.pds_endpoint == "https://pds.example.com"
         assert loaded.dpop_nonce_as == "nonce_as"
         assert loaded.dpop_nonce_pds == "nonce_pds"
+        assert loaded.access_token_expiry == 1234567890.0
+        assert loaded.refresh_token_expiry == 2234567890.0
 
     def test_jwk_round_trip(self):
         """JWK serialisation should round-trip correctly."""
@@ -391,7 +398,8 @@ class TestAuthenticatedRequest:
             dpop_nonce_as="nonce-as",
             dpop_nonce_pds=None,
             pds_endpoint="https://pds.example.com",
-            token_expiry=9999999999.0,
+            access_token_expiry=9999999999.0,
+            refresh_token_expiry=9999999999.0,
             auth_server_url="https://bsky.social/oauth/token",
         )
 
@@ -448,7 +456,8 @@ class TestGetAnySession:
             refresh_token="",
             dpop_key=key,
             pds_endpoint="https://pds.example.com",
-            token_expiry=time.time() - 100,
+            access_token_expiry=time.time() - 100,
+            refresh_token_expiry=time.time() - 100,
             auth_server_url="https://bsky.social/oauth/token",
         )
         expired.save()
@@ -460,7 +469,8 @@ class TestGetAnySession:
             refresh_token="",
             dpop_key=key,
             pds_endpoint="https://pds.example.com",
-            token_expiry=time.time() + 3600,
+            access_token_expiry=time.time() + 3600,
+            refresh_token_expiry=time.time() + 86400,
             auth_server_url="https://bsky.social/oauth/token",
         )
         valid.save()
@@ -468,6 +478,103 @@ class TestGetAnySession:
         selected = get_any_session()
         assert selected is not None
         assert selected.did == "did:plc:bbb"
+
+
+class TestRefreshHandling:
+    @staticmethod
+    def _make_session(handle: str = "alice.bsky.social") -> Session:
+        key = generate_dpop_keypair()
+        return Session(
+            did="did:plc:alice",
+            handle=handle,
+            access_token="old-access",
+            refresh_token="old-refresh",
+            dpop_key=key,
+            dpop_nonce_as="nonce-as",
+            pds_endpoint="https://pds.example.com",
+            access_token_expiry=time.time() - 5,
+            refresh_token_expiry=time.time() + 86400,
+            auth_server_url="https://auth.example.com/oauth/token",
+        )
+
+    @patch("skycoll.auth.Session.save")
+    @patch("skycoll.auth.httpx.post")
+    def test_maybe_refresh_refreshes_near_expiry(self, mock_post, mock_save):
+        session = self._make_session()
+        mock_post.return_value = _mock_response(
+            200,
+            json_data={
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_in": 1200,
+                "sub": "did:plc:alice",
+            },
+            headers={},
+        )
+
+        refreshed = _maybe_refresh(session)
+
+        assert refreshed.access_token == "new-access"
+        assert refreshed.refresh_token == "new-refresh"
+        assert refreshed.access_token_expiry > time.time()
+        mock_save.assert_called()
+
+    @patch("skycoll.auth.httpx.post")
+    def test_refresh_4xx_becomes_auth_error(self, mock_post):
+        session = self._make_session("dead.bsky.social")
+        mock_post.return_value = _mock_response(401, json_data={"error": "invalid_grant"}, headers={})
+
+        with pytest.raises(AuthError, match="Session expired for dead.bsky.social"):
+            _refresh_session(session)
+
+    @patch("skycoll.auth.httpx.post")
+    def test_get_any_session_skips_dead_and_uses_next(self, mock_post, tmp_path, monkeypatch):
+        sessions_dir = str(tmp_path / "sessions")
+        monkeypatch.setattr("skycoll.auth.SESSIONS_DIR", sessions_dir)
+
+        key = generate_dpop_keypair()
+        dead = Session(
+            did="did:plc:dead",
+            handle="dead.bsky.social",
+            access_token="dead-access",
+            refresh_token="dead-refresh",
+            dpop_key=key,
+            pds_endpoint="https://pds.example.com",
+            access_token_expiry=time.time() - 100,
+            refresh_token_expiry=time.time() + 100,
+            auth_server_url="https://auth.example.com/oauth/token",
+        )
+        dead.save()
+
+        valid = Session(
+            did="did:plc:valid",
+            handle="valid.bsky.social",
+            access_token="valid-access",
+            refresh_token="valid-refresh",
+            dpop_key=key,
+            pds_endpoint="https://pds.example.com",
+            access_token_expiry=time.time() + 3600,
+            refresh_token_expiry=time.time() + 86400,
+            auth_server_url="https://auth.example.com/oauth/token",
+        )
+        valid.save()
+
+        mock_post.return_value = _mock_response(401, json_data={"error": "invalid_grant"}, headers={})
+
+        selected = get_any_session()
+        assert selected is not None
+        assert selected.handle == "valid.bsky.social"
+
+
+class TestJwtExpiryParsing:
+    def test_jwt_expiry_parses_exp_claim(self):
+        header = _b64url(json.dumps({"alg": "none", "typ": "JWT"}).encode("utf-8"))
+        payload = _b64url(json.dumps({"exp": 2000000000}).encode("utf-8"))
+        token = f"{header}.{payload}.sig"
+        assert _jwt_expiry(token) == 2000000000.0
+
+    def test_jwt_expiry_returns_zero_for_invalid_token(self):
+        assert _jwt_expiry("not-a-jwt") == 0.0
 
 
 class TestSessionManagement:
@@ -483,7 +590,8 @@ class TestSessionManagement:
             refresh_token="ref",
             dpop_key=key,
             pds_endpoint="https://pds.example.com",
-            token_expiry=time.time() + 60,
+            access_token_expiry=time.time() + 60,
+            refresh_token_expiry=time.time() + 3600,
             auth_server_url="https://bsky.social/oauth/token",
         )
         s.save()

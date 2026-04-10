@@ -65,14 +65,22 @@ def run_list() -> None:
         for session in sessions:
             handle = session.get("handle", "")
             did = session.get("did", "")
-            expiry = float(session.get("token_expiry", 0.0) or 0.0)
-            delta = expiry - now
-            if delta >= 0:
-                status = _format_future(delta)
-                info(f"  ✓  {handle}  ({did})  {status}")
+            state = session.get("status", "valid")
+
+            if state == "dead":
+                info(f"  ✗  {handle}  ({did})  session dead (re-auth required)")
+                continue
+            if state == "access_expired":
+                info(f"  ⚠  {handle}  ({did})  access token expired (refreshing...)")
+                continue
+
+            refresh_expiry = float(session.get("refresh_token_expiry", 0.0) or 0.0)
+            if refresh_expiry > 0:
+                delta = refresh_expiry - now
+                status = _format_future(delta) if delta >= 0 else _format_past(abs(delta))
+                info(f"  ✓  {handle}  ({did})  refresh token {status}")
             else:
-                status = _format_past(abs(delta))
-                info(f"  ✗  {handle}  ({did})  {status}")
+                info(f"  ✓  {handle}  ({did})  refresh token expiry unknown")
     except SkycollError:
         raise
     except (KeyError, TypeError, ValueError) as exc:

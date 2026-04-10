@@ -7,7 +7,7 @@ import argparse
 import sys
 
 from skycoll import __version__
-from skycoll.errors import SkycollError
+from skycoll.errors import AuthError, SkycollError
 from skycoll.output import err
 from skycoll.verbosity import is_verbose, set_verbose
 
@@ -200,7 +200,10 @@ def main() -> None:
         sys.exit(130)
     except SkycollError as exc:
         label = getattr(exc, "label", "Error")
-        err(f"{label}: {exc}")
+        if isinstance(exc, AuthError) and str(exc).startswith("Session expired for "):
+            err(str(exc))
+        else:
+            err(f"{label}: {exc}")
         sys.exit(1)
     except Exception as e:
         if is_verbose():

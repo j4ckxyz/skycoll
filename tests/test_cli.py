@@ -139,3 +139,22 @@ def test_cli_fallback_handler_for_untyped_exceptions(capsys) -> None:
         "✗ Unexpected error: boom",
         "run with -v for details",
     ]
+
+
+def test_cli_auth_error_session_expired_omits_label_prefix(capsys) -> None:
+    from skycoll import __main__ as cli
+    from skycoll.errors import AuthError
+
+    with patch("sys.argv", ["skycoll", "resolve", "alice.bsky.social"]):
+        with patch(
+            "skycoll.commands.resolve.run",
+            side_effect=AuthError("Session expired for alice.bsky.social — run: skycoll auth login alice.bsky.social."),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+    assert exc.value.code == 1
+    out_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert out_lines == [
+        "✗ Session expired for alice.bsky.social — run: skycoll auth login alice.bsky.social.",
+    ]

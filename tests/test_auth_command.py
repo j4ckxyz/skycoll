@@ -37,14 +37,18 @@ def test_auth_list_formats_valid_and_expired(mock_list, capsys):
         {
             "handle": "valid.bsky.social",
             "did": "did:plc:valid",
-            "token_expiry": 9999999999.0,
-            "is_valid": True,
+            "refresh_token_expiry": 9999999999.0,
+            "status": "valid",
         },
         {
             "handle": "old.bsky.social",
             "did": "did:plc:old",
-            "token_expiry": 1.0,
-            "is_valid": False,
+            "status": "dead",
+        },
+        {
+            "handle": "stale.bsky.social",
+            "did": "did:plc:stale",
+            "status": "access_expired",
         },
     ]
 
@@ -53,3 +57,4 @@ def test_auth_list_formats_valid_and_expired(mock_list, capsys):
     assert "Saved sessions:" in out
     assert "✓  valid.bsky.social" in out
     assert "✗  old.bsky.social" in out
+    assert "⚠  stale.bsky.social" in out
