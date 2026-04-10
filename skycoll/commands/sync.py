@@ -8,7 +8,9 @@ parsing is performed.
 from __future__ import annotations
 
 from skycoll.api import get_repo_car
-from skycoll.auth import get_any_session
+from skycoll.auth import get_authenticated_session
+from skycoll.errors import ParseError, SkycollError
+from skycoll.output import info, ok
 from skycoll.resolve import resolve
 from skycoll.storage import write_car
 
@@ -19,17 +21,25 @@ def run(handle: str) -> None:
     Args:
         handle: The user's Bluesky handle.
     """
-    target = resolve(handle)
-    target_did = target["did"]
+    try:
+        target = resolve(handle)
+        target_did = target.get("did") if isinstance(target, dict) else None
+        if not target_did:
+            raise ParseError(f"resolve returned incomplete identity data for '{handle}'")
 
-    session = get_any_session()
-    if session is None:
-        print("No cached OAuth session found. Run: skycoll init <your-handle>")
-        raise SystemExit(1)
-    print(f"Using cached session: {session.handle} ({session.did})")
+        info(f"Authenticating as {handle} …")
+        session = get_authenticated_session(handle)
 
-    print(f"Downloading full repo CAR for {target_did} …")
-    car_bytes = get_repo_car(session, target_did)
+        info(f"Downloading full repo CAR for {target_did} …")
+        car_bytes = get_repo_car(session, target_did)
 
-    path = write_car(handle, car_bytes)
-    print(f"Wrote {len(car_bytes)} bytes → {path}")
+        path = write_car(handle, car_bytes)
+        ok(f"Wrote {len(car_bytes)} bytes → {path}")
+    except SkycollError:
+        raise
+    except OSError as exc:
+        raise ParseError(f"failed to write CAR file for '{handle}': {exc}") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParseError(f"invalid sync data for '{handle}': {exc}") from exc
+    except Exception as exc:
+        raise ParseError(f"unexpected sync error for '{handle}': {exc}") from exc

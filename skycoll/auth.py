@@ -46,7 +46,9 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from cryptography.hazmat.primitives import hashes
 
-from .resolve import resolve, resolve_pds_endpoint, fetch_did_document
+from .resolve import resolve
+from .errors import AuthError, NetworkError, RateLimitError, NotFoundError, ParseError
+from .output import info, warn
 from .verbosity import vprint
 
 SESSIONS_DIR = os.path.expanduser("~/.skycoll/sessions")
@@ -257,7 +259,7 @@ def discover_auth_server(pds_url: str) -> tuple[dict, str]:
         vprint("auth discovery: fallback authorization-server metadata fetch failed")
         pass
 
-    raise RuntimeError(
+    raise AuthError(
         f"Cannot discover OAuth auth server for {pds_url!r}.\n"
         f"  Tried:\n"
         f"    • PDS protected-resource metadata (.well-known/oauth-protected-resource)\n"
@@ -458,13 +460,16 @@ def _do_token_request(
         proof = build_dpop_proof(dpop_key, "POST", token_url, nonce=nonce)
         headers = {"DPoP": proof, "Content-Type": "application/x-www-form-urlencoded"}
         vprint(f"token request attempt={attempt + 1} nonce={'set' if nonce else 'none'}")
-        resp = httpx.post(
-            token_url,
-            data=body,
-            headers=headers,
-            follow_redirects=True,
-            timeout=30,
-        )
+        try:
+            resp = httpx.post(
+                token_url,
+                data=body,
+                headers=headers,
+                follow_redirects=True,
+                timeout=30,
+            )
+        except httpx.HTTPError as exc:
+            raise NetworkError(f"could not reach auth server token endpoint: {exc}") from exc
         new_nonce = _extract_nonce_from_response(resp)
         vprint(f"token response status={resp.status_code} nonce_header={'present' if new_nonce else 'absent'}")
 
@@ -478,11 +483,11 @@ def _do_token_request(
             nonce = new_nonce
             continue
 
-        raise RuntimeError(
+        raise AuthError(
             f"Token request failed (HTTP {resp.status_code}): {resp.text}"
         )
 
-    raise RuntimeError("Token request failed after DPoP nonce retry")
+    raise AuthError("Token request failed after DPoP nonce retry")
 
 
 def authenticate(handle: str) -> Session:
@@ -565,10 +570,16 @@ def authenticate(handle: str) -> Session:
                 "DPoP": proof,
                 "Content-Type": "application/x-www-form-urlencoded",
             }
-            resp = httpx.post(
-                par_url, data=par_body, headers=par_headers,
-                follow_redirects=True, timeout=30,
-            )
+            try:
+                resp = httpx.post(
+                    par_url,
+                    data=par_body,
+                    headers=par_headers,
+                    follow_redirects=True,
+                    timeout=30,
+                )
+            except httpx.HTTPError as exc:
+                raise NetworkError(f"could not reach auth server PAR endpoint: {exc}") from exc
             vprint(f"PAR response status={resp.status_code}")
 
             # If the server requires a DPoP nonce, retry once with it.
@@ -584,27 +595,30 @@ def authenticate(handle: str) -> Session:
                     vprint("PAR retrying with server-provided DPoP nonce")
                     proof = build_dpop_proof(dpop_key, "POST", par_url, nonce=dpop_nonce)
                     par_headers["DPoP"] = proof
-                    resp = httpx.post(
-                        par_url,
-                        data=par_body,
-                        headers=par_headers,
-                        follow_redirects=True,
-                        timeout=30,
-                    )
+                    try:
+                        resp = httpx.post(
+                            par_url,
+                            data=par_body,
+                            headers=par_headers,
+                            follow_redirects=True,
+                            timeout=30,
+                        )
+                    except httpx.HTTPError as exc:
+                        raise NetworkError(f"could not reach auth server PAR endpoint: {exc}") from exc
                     vprint(f"PAR retry response status={resp.status_code}")
                     new_nonce = _extract_nonce_from_response(resp)
                     if new_nonce:
                         dpop_nonce = new_nonce
 
             if resp.status_code not in (200, 201):
-                raise RuntimeError(
+                raise AuthError(
                     f"PAR request failed (HTTP {resp.status_code}): {resp.text}"
                 )
 
             par_data = resp.json()
             request_uri = par_data.get("request_uri")
             if not request_uri:
-                raise RuntimeError(
+                raise AuthError(
                     f"PAR response missing request_uri: {par_data}"
                 )
             vprint("PAR succeeded; received request_uri")
@@ -624,20 +638,20 @@ def authenticate(handle: str) -> Session:
             auth_url = f"{auth_url_base}?{urlencode(auth_params)}"
             dpop_nonce = None
 
-        print(f"Opening browser for {handle} …")
-        print(f"If the browser doesn't open, visit:\n  {auth_url}")
+        info(f"Opening browser for {handle} …")
+        info(f"If the browser doesn't open, visit:\n  {auth_url}")
         webbrowser.open(auth_url)
 
         # --- Wait for callback ---
         if not _CALLBACK_EVENT.wait(timeout=300):
-            raise RuntimeError("Timed out waiting for OAuth callback")
+            raise AuthError("Timed out waiting for OAuth callback")
         with _CALLBACK_LOCK:
             result = dict(_CALLBACK_RESULT)
             _CALLBACK_RESULT.clear()
         _CALLBACK_EVENT.clear()
 
         if "error" in result:
-            raise RuntimeError(
+            raise AuthError(
                 f"OAuth error: {result.get('error', ['unknown'])[0]} — "
                 f"{result.get('error_description', [''])[0]}"
             )
@@ -659,7 +673,7 @@ def authenticate(handle: str) -> Session:
         # --- Verify sub matches expected DID ---
         returned_sub = token_data.get("sub", "")
         if returned_sub and returned_sub != did:
-            raise RuntimeError(
+            raise AuthError(
                 f"Token sub mismatch: expected {did}, got {returned_sub}"
             )
 
@@ -794,6 +808,60 @@ def get_any_session() -> Optional[Session]:
     return None
 
 
+def login(handle: str) -> Session:
+    """Explicitly authenticate and persist a session for *handle*."""
+    return authenticate(handle)
+
+
+def logout(handle: str) -> tuple[str, str]:
+    """Delete the saved session for *handle*.
+
+    Returns:
+        Tuple of (resolved_handle, did).
+    """
+    identity = resolve(handle)
+    did = identity["did"]
+    safe = did.replace(":", "_")
+    path = os.path.join(SESSIONS_DIR, f"{safe}.json")
+    if not os.path.exists(path):
+        raise NotFoundError(f"no saved session for {identity['handle']} ({did})")
+    try:
+        os.remove(path)
+    except OSError as exc:
+        raise AuthError(f"failed to remove session file: {exc}") from exc
+    return identity["handle"], did
+
+
+def list_saved_sessions() -> list[dict]:
+    """List saved sessions from disk with validity metadata."""
+    if not os.path.isdir(SESSIONS_DIR):
+        return []
+
+    out: list[dict] = []
+    now = time.time()
+    for entry in sorted(os.listdir(SESSIONS_DIR)):
+        if not entry.endswith(".json"):
+            continue
+        path = os.path.join(SESSIONS_DIR, entry)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ParseError(f"invalid session file {path}: {exc}") from exc
+
+        expiry = float(data.get("token_expiry", 0.0) or 0.0)
+        out.append(
+            {
+                "handle": data.get("handle", ""),
+                "did": data.get("did", ""),
+                "token_expiry": expiry,
+                "is_valid": expiry > now,
+            }
+        )
+
+    return out
+
+
 def make_authenticated_request(
     session: Session,
     method: str,
@@ -836,7 +904,10 @@ def make_authenticated_request(
         if appview:
             headers["atproto-proxy"] = appview
 
-        resp = httpx.request(method, url, headers=headers, timeout=30, **kwargs)
+        try:
+            resp = httpx.request(method, url, headers=headers, timeout=30, **kwargs)
+        except httpx.HTTPError as exc:
+            raise NetworkError(f"could not reach {url}: {exc}") from exc
         vprint(f"response status={resp.status_code} url={url}")
 
         new_nonce = _extract_nonce_from_response(resp)
@@ -847,7 +918,7 @@ def make_authenticated_request(
 
         if resp.status_code == 429:
             wait = 2 ** attempt
-            print(f"  Rate-limited, retrying in {wait}s …")
+            warn(f"Rate-limited, retrying in {wait}s …")
             time.sleep(wait)
             continue
 
@@ -860,4 +931,4 @@ def make_authenticated_request(
 
         return resp
 
-    raise RuntimeError(f"Request to {url} failed after {max_attempts} attempts")
+    raise RateLimitError(f"request to {url} failed after {max_attempts} attempts")

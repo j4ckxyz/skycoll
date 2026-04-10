@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from unittest.mock import patch
 
 
@@ -50,3 +52,90 @@ def test_convert_command_forwarded() -> None:
             cli.main()
 
     mock_run.assert_called_once_with("alice", to_format="gexf")
+
+
+def test_auth_login_command_forwarded() -> None:
+    from skycoll import __main__ as cli
+
+    with patch("sys.argv", ["skycoll", "auth", "login", "alice.bsky.social"]):
+        with patch("skycoll.commands.auth.run_login") as mock_login:
+            cli.main()
+
+    mock_login.assert_called_once_with("alice.bsky.social")
+
+
+def test_auth_list_command_forwarded() -> None:
+    from skycoll import __main__ as cli
+
+    with patch("sys.argv", ["skycoll", "auth", "list"]):
+        with patch("skycoll.commands.auth.run_list") as mock_list:
+            cli.main()
+
+    mock_list.assert_called_once_with()
+
+
+def test_cli_handles_typed_errors_without_traceback(capsys) -> None:
+    from skycoll import __main__ as cli
+    from skycoll.errors import NotFoundError
+
+    with patch("sys.argv", ["skycoll", "resolve", "alice.bsky.social"]):
+        with patch("skycoll.commands.resolve.run", side_effect=NotFoundError("missing test record")):
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "✗ Not found: missing test record" in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_message"),
+    [
+        (
+            ["edgelist", "missing"],
+            "No .dat file found for 'missing'. Run: skycoll init missing",
+        ),
+        (
+            ["fetch", "missing"],
+            "No .dat file found for 'missing'. Run: skycoll init missing",
+        ),
+        (
+            ["threads", "missing"],
+            "No .twt file found for 'missing'. Run: skycoll posts missing",
+        ),
+    ],
+)
+def test_cli_missing_local_files_are_clean_one_line_errors(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    argv,
+    expected_message,
+) -> None:
+    from skycoll import __main__ as cli
+
+    monkeypatch.chdir(tmp_path)
+
+    with patch("sys.argv", ["skycoll", *argv]):
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+
+    assert exc.value.code == 1
+    out_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert out_lines == [f"✗ Not found: {expected_message}"]
+
+
+def test_cli_fallback_handler_for_untyped_exceptions(capsys) -> None:
+    from skycoll import __main__ as cli
+
+    with patch("sys.argv", ["skycoll", "resolve", "alice.bsky.social"]):
+        with patch("skycoll.commands.resolve.run", side_effect=ValueError("boom")):
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+    assert exc.value.code == 1
+    out_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert out_lines == [
+        "✗ Unexpected error: boom",
+        "run with -v for details",
+    ]

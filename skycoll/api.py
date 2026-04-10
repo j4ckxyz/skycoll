@@ -17,19 +17,54 @@ from typing import Generator, Optional
 
 import httpx
 
-from .auth import Session, make_authenticated_request
+from .auth import Session, make_authenticated_request, get_any_session
+from .errors import NetworkError, ParseError, RateLimitError
 from .verbosity import vprint
 
 _MAX_POSTS = 3000
 
 
+def _request(
+    session: Optional[Session],
+    method: str,
+    path: str,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
+    **kwargs,
+) -> httpx.Response:
+    """Make an ATProto HTTP request with optional auth.
+
+    If *session* is provided, DPoP auth is attached. Otherwise a plain request
+    is made to *pds_endpoint*.
+    """
+    if session is None:
+        session = get_any_session()
+
+    if session is not None:
+        return make_authenticated_request(session, method, path, appview=appview, **kwargs)
+
+    url = path if path.startswith("http") else f"{pds_endpoint or ''}{path}"
+    if not url.startswith("http"):
+        raise NetworkError(f"cannot make unauthenticated request for relative path: {path}")
+
+    headers = dict(kwargs.pop("headers", {}))
+    if appview:
+        headers["atproto-proxy"] = appview
+
+    try:
+        return httpx.request(method, url, headers=headers, timeout=30, **kwargs)
+    except httpx.HTTPError as exc:
+        raise NetworkError(f"could not reach {url}: {exc}") from exc
+
+
 def _paginated_get(
-    session: Session,
+    session: Optional[Session],
     path: str,
     params: Optional[dict] = None,
     cursor_key: str = "cursor",
     collection_items_key: str = "records",
     appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
 ) -> Generator[dict, None, None]:
     """Yield individual items from a paginated AT Protocol list endpoint.
 
@@ -56,23 +91,33 @@ def _paginated_get(
     while True:
         vprint(f"paginated GET start path={path} params={params}")
         for attempt in range(max_retries + 1):
-            resp = make_authenticated_request(session, "GET", path, params=params, appview=appview)
+            resp = _request(
+                session,
+                "GET",
+                path,
+                params=params,
+                appview=appview,
+                pds_endpoint=pds_endpoint,
+            )
 
             if resp.status_code == 429:
                 if attempt == max_retries:
-                    raise RuntimeError(f"Rate-limited on {path} after {max_retries} retries")
+                    raise RateLimitError(f"on {path} after {max_retries} retries")
                 wait = 2 ** attempt
                 print(f"  Rate-limited on {path}, retrying in {wait}s …")
                 time.sleep(wait)
                 continue
 
             if resp.status_code != 200:
-                raise RuntimeError(
+                raise NetworkError(
                     f"API error on {path}: HTTP {resp.status_code} — {resp.text[:200]}"
                 )
             break
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise ParseError(f"invalid JSON response from {path}") from exc
         items = data.get(collection_items_key, [])
         if not items and collection_items_key != "records":
             items = data.get("records", [])
@@ -96,7 +141,12 @@ def _paginated_get(
 # ---------------------------------------------------------------------------
 
 
-def get_profile(session: Session, actor: str, appview: Optional[str] = None) -> dict:
+def get_profile(
+    session: Optional[Session],
+    actor: str,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
+) -> dict:
     """Fetch the profile (``app.bsky.actor.getProfile``) for *actor*.
 
     Args:
@@ -107,22 +157,29 @@ def get_profile(session: Session, actor: str, appview: Optional[str] = None) -> 
     Returns:
         Profile record dict.
     """
-    resp = make_authenticated_request(
+    resp = _request(
         session,
         "GET",
         "/xrpc/app.bsky.actor.getProfile",
         params={"actor": actor},
         appview=appview,
+        pds_endpoint=pds_endpoint,
     )
     if resp.status_code != 200:
-        raise RuntimeError(
+        raise NetworkError(
             f"Failed to fetch profile for {actor}: HTTP {resp.status_code}"
         )
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise ParseError(f"invalid profile JSON for {actor}") from exc
 
 
 def get_follows(
-    session: Session, actor: str, appview: Optional[str] = None
+    session: Optional[Session],
+    actor: str,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
 ) -> Generator[dict, None, None]:
     """Yield follow-record items for *actor*.
 
@@ -140,11 +197,15 @@ def get_follows(
         cursor_key="cursor",
         collection_items_key="follows",
         appview=appview,
+        pds_endpoint=pds_endpoint,
     )
 
 
 def get_followers(
-    session: Session, actor: str, appview: Optional[str] = None
+    session: Optional[Session],
+    actor: str,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
 ) -> Generator[dict, None, None]:
     """Yield follower-record items for *actor*.
 
@@ -162,10 +223,16 @@ def get_followers(
         cursor_key="cursor",
         collection_items_key="followers",
         appview=appview,
+        pds_endpoint=pds_endpoint,
     )
 
 
-def get_lists(session: Session, actor: str, appview: Optional[str] = None) -> Generator[dict, None, None]:
+def get_lists(
+    session: Optional[Session],
+    actor: str,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
+) -> Generator[dict, None, None]:
     """Yield list-view items for *actor* via ``app.bsky.graph.getLists``.
 
     Args:
@@ -180,10 +247,16 @@ def get_lists(session: Session, actor: str, appview: Optional[str] = None) -> Ge
         cursor_key="cursor",
         collection_items_key="lists",
         appview=appview,
+        pds_endpoint=pds_endpoint,
     )
 
 
-def get_starter_packs(session: Session, actor: str, appview: Optional[str] = None) -> Generator[dict, None, None]:
+def get_starter_packs(
+    session: Optional[Session],
+    actor: str,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
+) -> Generator[dict, None, None]:
     """Yield starter-pack view items for *actor* via ``app.bsky.graph.getActorStarterPacks``.
 
     Args:
@@ -198,6 +271,7 @@ def get_starter_packs(session: Session, actor: str, appview: Optional[str] = Non
         cursor_key="cursor",
         collection_items_key="starterPacks",
         appview=appview,
+        pds_endpoint=pds_endpoint,
     )
 
 
@@ -207,7 +281,11 @@ def get_starter_packs(session: Session, actor: str, appview: Optional[str] = Non
 
 
 def get_posts(
-    session: Session, actor: str, limit: int = _MAX_POSTS, appview: Optional[str] = None
+    session: Optional[Session],
+    actor: str,
+    limit: int = _MAX_POSTS,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
 ) -> Generator[dict, None, None]:
     """Yield post records for *actor*, up to *limit* posts.
 
@@ -232,6 +310,7 @@ def get_posts(
         cursor_key="cursor",
         collection_items_key="records",
         appview=appview,
+        pds_endpoint=pds_endpoint,
     ):
         yield record
         count += 1
@@ -240,7 +319,10 @@ def get_posts(
 
 
 def get_author_feed(
-    session: Session, actor: str, appview: Optional[str] = None
+    session: Optional[Session],
+    actor: str,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
 ) -> Generator[dict, None, None]:
     """Yield feed-view items for *actor* via ``app.bsky.feed.getAuthorFeed``.
 
@@ -258,6 +340,7 @@ def get_author_feed(
         cursor_key="cursor",
         collection_items_key="feed",
         appview=appview,
+        pds_endpoint=pds_endpoint,
     )
 
 
@@ -267,7 +350,10 @@ def get_author_feed(
 
 
 def get_likes(
-    session: Session, actor: str, appview: Optional[str] = None
+    session: Optional[Session],
+    actor: str,
+    appview: Optional[str] = None,
+    pds_endpoint: Optional[str] = None,
 ) -> Generator[dict, None, None]:
     """Yield like-record items for *actor*.
 
@@ -290,6 +376,7 @@ def get_likes(
         cursor_key="cursor",
         collection_items_key="records",
         appview=appview,
+        pds_endpoint=pds_endpoint,
     )
 
 
@@ -304,7 +391,7 @@ def delete_like(session: Session, uri: str) -> None:
     """
     parts = uri.split("/")
     if len(parts) < 5:
-        raise ValueError(f"Invalid AT URI: {uri}")
+        raise ParseError(f"invalid AT URI: {uri}")
     repo = parts[2]
     collection = parts[3]
     rkey = parts[4]
@@ -316,7 +403,7 @@ def delete_like(session: Session, uri: str) -> None:
         json={"repo": repo, "collection": collection, "rkey": rkey},
     )
     if resp.status_code not in (200, 204):
-        raise RuntimeError(
+        raise NetworkError(
             f"Failed to delete like {uri}: HTTP {resp.status_code} — {resp.text[:200]}"
         )
 
@@ -360,11 +447,11 @@ def get_repo_car(session: Session, did: str, appview: Optional[str] = None) -> b
             time.sleep(wait)
             continue
         if resp.status_code != 200:
-            raise RuntimeError(
+            raise NetworkError(
                 f"Failed to download repo CAR for {did}: HTTP {resp.status_code} — {resp.text[:200]}"
             )
         return resp.content
-    raise RuntimeError(f"Failed to download repo CAR for {did} after {max_attempts} attempts")
+    raise RateLimitError(f"failed to download repo CAR for {did} after {max_attempts} attempts")
 
 
 def parse_car_records(car_bytes: bytes) -> list[dict]:
@@ -529,7 +616,7 @@ def _read_varint(stream: io.BytesIO) -> int:
 # ---------------------------------------------------------------------------
 
 
-def download_avatar(session: Session, avatar_url: str, dest_path: str) -> None:
+def download_avatar(session: Optional[Session], avatar_url: str, dest_path: str) -> None:
     """Download an avatar image to *dest_path*.
 
     Args:

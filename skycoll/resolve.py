@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .errors import NotFoundError, NetworkError, ParseError
 from .verbosity import vprint
 
 _BSKY_SOCIAL = "https://bsky.social"
@@ -89,7 +90,7 @@ def resolve_handle_to_did(handle: str) -> str:
         vprint("resolve handle: DNS TXT fallback failed")
         pass
 
-    raise RuntimeError(
+    raise NotFoundError(
         f"Cannot resolve handle {handle!r} to a DID.\n"
         f"  Tried: HTTPS well-known, bsky.social XRPC, DNS TXT.\n"
         f"  Check that the handle is correct and the account exists."
@@ -119,7 +120,7 @@ def resolve_did_to_handle(did: str) -> str:
             if aka.startswith("at://"):
                 vprint("resolve did: succeeded via DID document alsoKnownAs")
                 return aka[5:]
-    except RuntimeError as exc:
+    except Exception as exc:
         # 2) Fallback: bsky.social XRPC can resolve some DIDs directly
         try:
             vprint("resolve did: trying bsky.social XRPC fallback")
@@ -138,7 +139,7 @@ def resolve_did_to_handle(did: str) -> str:
             vprint("resolve did: bsky.social XRPC fallback failed")
             pass
 
-        raise RuntimeError(
+        raise NotFoundError(
             f"Cannot resolve DID {did!r} to a handle.\n"
             f"  Reasons tried:\n"
             f"    • DID document fetch failed: {exc}\n"
@@ -146,7 +147,7 @@ def resolve_did_to_handle(did: str) -> str:
             f"  Check that the DID is correct and the account exists."
         )
 
-    raise RuntimeError(f"DID document for {did} contains no handle")
+    raise NotFoundError(f"DID document for {did} contains no handle")
 
 
 def fetch_did_document(did: str) -> dict:
@@ -170,7 +171,7 @@ def fetch_did_document(did: str) -> dict:
         domain = did[len("did:web:"):]
         url = f"https://{domain}/.well-known/did.json"
     else:
-        raise RuntimeError(
+        raise ParseError(
             f"Unsupported DID method in {did!r}.\n"
             f"  Only did:plc and did:web are supported."
         )
@@ -179,26 +180,26 @@ def fetch_did_document(did: str) -> dict:
         vprint(f"fetch did document: GET {url}")
         resp = httpx.get(url, follow_redirects=True, timeout=15)
     except httpx.HTTPError as exc:
-        raise RuntimeError(
+        raise NetworkError(
             f"Network error fetching DID document for {did!r}:\n"
             f"  {exc}"
         )
 
     if resp.status_code == 404:
-        raise RuntimeError(
+        raise NotFoundError(
             f"DID not found: {did!r}\n"
             f"  The PLC directory has no record of this DID.\n"
             f"  Verify the DID is correct — a common mistake is\n"
             f"  swapping letters (e.g. 'ae' vs 'ur')."
         )
     if resp.status_code != 200:
-        raise RuntimeError(
+        raise NetworkError(
             f"Failed to fetch DID document for {did!r} (HTTP {resp.status_code})"
         )
     try:
         return resp.json()
     except json.JSONDecodeError:
-        raise RuntimeError(
+        raise ParseError(
             f"DID document for {did!r} is not valid JSON"
         )
 

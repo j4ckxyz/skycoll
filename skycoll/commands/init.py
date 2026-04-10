@@ -18,8 +18,10 @@ from skycoll.api import (
     download_avatar,
 )
 from skycoll.appview import resolve_appview
-from skycoll.auth import get_authenticated_session
 from skycoll.constellation import get_all_backlink_counts
+from skycoll.errors import ParseError, SkycollError
+from skycoll.output import info, ok, warn
+from skycoll.resolve import resolve
 from skycoll.storage import write_dat, avatar_path
 
 
@@ -39,74 +41,87 @@ def run(
         appview: Optional AppView name or DID (for ``atproto-proxy`` header).
         constellation: Optional Constellation host URL for backlinks.
     """
-    appview_did = resolve_appview(appview)
-
-    print(f"Authenticating as {handle} …")
-    session = get_authenticated_session(handle)
-    print(f"Authenticated as {session.handle} ({session.did})")
-
-    print("Fetching profile …")
-    profile = get_profile(session, session.did, appview=appview_did)
-
-    if not include_labels:
-        profile = dict(profile)
-        profile.pop("labels", None)
-        profile.pop("selfLabels", None)
-
-    print("Fetching follows …")
-    follows = list(get_follows(session, session.did, appview=appview_did))
-
-    print("Fetching followers …")
-    followers = list(get_followers(session, session.did, appview=appview_did))
-
-    print(f"Follows: {len(follows)}, Followers: {len(followers)}")
-
-    lists_data = []
-    if fetch_lists:
-        print("Fetching lists …")
-        lists_data = list(get_lists(session, session.did, appview=appview_did))
-        print(f"Lists: {len(lists_data)}")
-
-    starter_packs_data = []
-    print("Fetching starter packs …")
     try:
-        starter_packs_data = list(get_starter_packs(session, session.did, appview=appview_did))
-        print(f"Starter packs: {len(starter_packs_data)}")
-    except RuntimeError as exc:
-        print(f"  ⚠ Could not fetch starter packs: {exc}")
+        appview_did = resolve_appview(appview)
+        identity = resolve(handle)
+        did = identity.get("did") if isinstance(identity, dict) else None
+        pds = identity.get("pds") if isinstance(identity, dict) else None
+        resolved_handle = identity.get("handle") if isinstance(identity, dict) else None
+        if not did or not pds or not resolved_handle:
+            raise ParseError(f"resolve returned incomplete identity data for '{handle}'")
 
-    backlinks = None
-    if constellation:
-        print(f"Querying Constellation backlinks at {constellation} …")
-        backlinks = get_all_backlink_counts(constellation, session.did)
-        if backlinks:
-            print(f"  Backlink data received")
-        else:
-            print("  ⚠ No backlink data available")
+        info(f"Resolved {resolved_handle} ({did})")
 
-    dat_path = write_dat(
-        handle,
-        profile,
-        follows,
-        followers,
-        lists=lists_data,
-        starter_packs=starter_packs_data,
-        backlinks=backlinks,
-    )
-    print(f"Wrote {dat_path}")
+        info("Fetching profile …")
+        profile = get_profile(None, did, appview=appview_did, pds_endpoint=pds)
 
-    avatar_url = profile.get("avatar", "")
-    if avatar_url:
-        dest = avatar_path(handle)
-        print(f"Downloading avatar → {dest}")
-        download_avatar(session, avatar_url, dest)
+        if not include_labels:
+            profile = dict(profile)
+            profile.pop("labels", None)
+            profile.pop("selfLabels", None)
 
-    for person in follows:
-        avatar_url = person.get("avatar", "")
+        info("Fetching follows …")
+        follows = list(get_follows(None, did, appview=appview_did, pds_endpoint=pds))
+
+        info("Fetching followers …")
+        followers = list(get_followers(None, did, appview=appview_did, pds_endpoint=pds))
+
+        info(f"Follows: {len(follows)}, Followers: {len(followers)}")
+
+        lists_data = []
+        if fetch_lists:
+            info("Fetching lists …")
+            lists_data = list(get_lists(None, did, appview=appview_did, pds_endpoint=pds))
+            info(f"Lists: {len(lists_data)}")
+
+        starter_packs_data = []
+        info("Fetching starter packs …")
+        try:
+            starter_packs_data = list(get_starter_packs(None, did, appview=appview_did, pds_endpoint=pds))
+            info(f"Starter packs: {len(starter_packs_data)}")
+        except Exception as exc:
+            warn(f"Could not fetch starter packs: {exc}")
+
+        backlinks = None
+        if constellation:
+            info(f"Querying Constellation backlinks at {constellation} …")
+            backlinks = get_all_backlink_counts(constellation, did)
+            if backlinks:
+                ok("Backlink data received")
+            else:
+                warn("No backlink data available")
+
+        dat_path = write_dat(
+            handle,
+            profile,
+            follows,
+            followers,
+            lists=lists_data,
+            starter_packs=starter_packs_data,
+            backlinks=backlinks,
+        )
+        ok(f"Wrote {dat_path}")
+
+        avatar_url = profile.get("avatar", "") if isinstance(profile, dict) else ""
         if avatar_url:
-            person_handle = person.get("handle", "")
-            if person_handle:
-                dest = avatar_path(person_handle)
-                download_avatar(session, avatar_url, dest)
+            dest = avatar_path(handle)
+            info(f"Downloading avatar → {dest}")
+            download_avatar(None, avatar_url, dest)
 
-    print("Done.")
+        for person in follows:
+            avatar_url = person.get("avatar", "") if isinstance(person, dict) else ""
+            if avatar_url:
+                person_handle = person.get("handle", "") if isinstance(person, dict) else ""
+                if person_handle:
+                    dest = avatar_path(person_handle)
+                    download_avatar(None, avatar_url, dest)
+
+        ok("Done.")
+    except SkycollError:
+        raise
+    except OSError as exc:
+        raise ParseError(f"failed to write init output for '{handle}': {exc}") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParseError(f"invalid init data for '{handle}': {exc}") from exc
+    except Exception as exc:
+        raise ParseError(f"unexpected init error for '{handle}': {exc}") from exc

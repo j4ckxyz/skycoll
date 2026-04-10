@@ -70,7 +70,8 @@ def test_edgelist_writes_both_gml_and_gexf(tmp_dir):
 
 def test_edgelist_requires_at_least_one_format(tmp_dir):
     from skycoll.commands.edgelist import run
+    from skycoll.errors import ParseError
 
     _seed_dat("alice")
-    with pytest.raises(RuntimeError, match="No output format selected"):
+    with pytest.raises(ParseError, match="no output format selected"):
         run("alice", render=False, write_gexf_file=False, write_gml_file=False)

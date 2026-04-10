@@ -25,8 +25,11 @@ from skycoll.auth import (
     make_authenticated_request,
     _build_localhost_client_id,
     get_any_session,
+    list_saved_sessions,
+    logout,
     _b64url,
 )
+from skycoll.errors import NotFoundError
 
 
 def _mock_response(status_code=200, json_data=None, text="", headers=None):
@@ -465,3 +468,41 @@ class TestGetAnySession:
         selected = get_any_session()
         assert selected is not None
         assert selected.did == "did:plc:bbb"
+
+
+class TestSessionManagement:
+    def test_list_saved_sessions(self, tmp_path, monkeypatch):
+        sessions_dir = str(tmp_path / "sessions")
+        monkeypatch.setattr("skycoll.auth.SESSIONS_DIR", sessions_dir)
+
+        key = generate_dpop_keypair()
+        s = Session(
+            did="did:plc:aaa",
+            handle="alice.bsky.social",
+            access_token="tok",
+            refresh_token="ref",
+            dpop_key=key,
+            pds_endpoint="https://pds.example.com",
+            token_expiry=time.time() + 60,
+            auth_server_url="https://bsky.social/oauth/token",
+        )
+        s.save()
+
+        items = list_saved_sessions()
+        assert len(items) == 1
+        assert items[0]["handle"] == "alice.bsky.social"
+        assert items[0]["did"] == "did:plc:aaa"
+        assert items[0]["is_valid"] is True
+
+    @patch("skycoll.auth.resolve")
+    def test_logout_missing_session(self, mock_resolve, tmp_path, monkeypatch):
+        sessions_dir = str(tmp_path / "sessions")
+        monkeypatch.setattr("skycoll.auth.SESSIONS_DIR", sessions_dir)
+        mock_resolve.return_value = {
+            "did": "did:plc:aaa",
+            "handle": "alice.bsky.social",
+            "pds": "https://pds.example.com",
+        }
+
+        with pytest.raises(NotFoundError):
+            logout("alice.bsky.social")

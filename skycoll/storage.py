@@ -37,6 +37,8 @@ import os
 import xml.etree.ElementTree as ET
 from typing import Optional
 
+from skycoll.errors import NotFoundError
+
 
 def _base_dir() -> str:
     """Return the current working directory (where data files are written)."""
@@ -213,8 +215,10 @@ def read_dat(handle: str) -> dict:
                         path_key = row[2] if len(row) > 2 else ""
                         count = int(row[3]) if len(row) > 3 and row[3].isdigit() else 0
                         backlinks.setdefault(collection, {})[path_key] = count
-    except FileNotFoundError:
-        raise FileNotFoundError(path)
+    except FileNotFoundError as exc:
+        raise NotFoundError(
+            f"No .dat file found for '{handle}'. Run: skycoll init {handle}"
+        ) from exc
 
     return {
         "profile": profile,

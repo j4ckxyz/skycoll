@@ -6,6 +6,8 @@ import json
 import os
 
 import httpx
+from skycoll.errors import NetworkError, ParseError, SkycollError
+from skycoll.output import info, ok
 
 
 def _fetch_plc_log(did: str) -> list[dict]:
@@ -18,10 +20,19 @@ def _fetch_plc_log(did: str) -> list[dict]:
         List of operation dicts (newest first).
     """
     url = f"https://plc.directory/{did}/log"
-    resp = httpx.get(url, follow_redirects=True, timeout=15)
+    try:
+        resp = httpx.get(url, follow_redirects=True, timeout=15)
+    except httpx.HTTPError as exc:
+        raise NetworkError(f"failed to fetch PLC log for {did}: {exc}") from exc
     if resp.status_code != 200:
-        raise RuntimeError(f"Failed to fetch PLC log for {did}: HTTP {resp.status_code}")
-    return resp.json()
+        raise NetworkError(f"failed to fetch PLC log for {did}: HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise ParseError(f"invalid PLC log JSON for {did}") from exc
+    if not isinstance(payload, list):
+        raise ParseError(f"invalid PLC log payload for {did}: expected a list")
+    return payload
 
 
 def _audit_summary(ops: list[dict]) -> str:
@@ -89,16 +100,24 @@ def run(did: str, audit: bool = False) -> None:
         did: A ``did:plc`` DID.
         audit: If ``True``, also print a human-readable summary.
     """
-    print(f"Fetching PLC operation log for {did} …")
-    ops = _fetch_plc_log(did)
-    print(f"  {len(ops)} operations found")
+    try:
+        info(f"Fetching PLC operation log for {did} …")
+        ops = _fetch_plc_log(did)
+        info(f"  {len(ops)} operations found")
 
-    # Write JSON log
-    safe_did = did.replace(":", "_")
-    path = os.path.join(os.getcwd(), f"{safe_did}.plc")
-    with open(path, "w") as f:
-        json.dump(ops, f, indent=2, ensure_ascii=False)
-    print(f"Wrote {path}")
+        safe_did = did.replace(":", "_")
+        path = os.path.join(os.getcwd(), f"{safe_did}.plc")
+        with open(path, "w") as f:
+            json.dump(ops, f, indent=2, ensure_ascii=False)
+        ok(f"Wrote {path}")
 
-    if audit:
-        print(f"\n{_audit_summary(ops)}")
+        if audit:
+            info(f"\n{_audit_summary(ops)}")
+    except SkycollError:
+        raise
+    except OSError as exc:
+        raise ParseError(f"failed to write PLC output for {did}: {exc}") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParseError(f"invalid PLC data for {did}: {exc}") from exc
+    except Exception as exc:
+        raise ParseError(f"unexpected PLC error for {did}: {exc}") from exc

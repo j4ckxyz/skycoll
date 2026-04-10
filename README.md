@@ -42,6 +42,10 @@ On subsequent runs, the saved session is reused and refreshed automatically when
 
 ## Commands
 
+Most read commands work against public AT Protocol data and do not require an
+interactive login. OAuth is required for write operations (`likes --purge`) and
+repo sync endpoints (`sync`, `posts --car`).
+
 ### `resolve`
 
 Resolve a handle to a DID (or a DID to a handle + PDS endpoint).
@@ -49,6 +53,21 @@ Resolve a handle to a DID (or a DID to a handle + PDS endpoint).
 ```bash
 skycoll resolve j4ck.xyz
 skycoll resolve did:plc:z72i7hdynmk6r22z27h6tvae
+```
+
+### `auth`
+
+Manage saved OAuth sessions explicitly.
+
+```bash
+# Trigger OAuth flow and save session
+skycoll auth login j4ck.xyz
+
+# Remove a saved session
+skycoll auth logout j4ck.xyz
+
+# List all saved sessions
+skycoll auth list
 ```
 
 ### `init`

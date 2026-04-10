@@ -8,6 +8,8 @@ file as a JSON array of thread trees, each with a ``root`` post and nested
 
 from __future__ import annotations
 
+from skycoll.errors import NotFoundError, ParseError, SkycollError
+from skycoll.output import info, ok
 from skycoll.storage import read_twt, write_threads
 
 
@@ -69,16 +71,32 @@ def run(handle: str) -> None:
     Args:
         handle: The user's handle (used to find and write files).
     """
-    print(f"Reading {handle}.twt …")
-    posts = read_twt(handle)
-    print(f"  {len(posts)} entries loaded")
+    try:
+        try:
+            posts = read_twt(handle)
+        except FileNotFoundError as exc:
+            raise NotFoundError(
+                f"No .twt file found for '{handle}'. Run: skycoll posts {handle}"
+            ) from exc
 
-    # Filter to actual posts (not reposts) that could be in threads
-    post_entries = [p for p in posts if p.get("type") in ("post", "quote")]
-    print(f"  {len(post_entries)} posts/quotes")
+        if not isinstance(posts, list):
+            raise ParseError(f"invalid .twt data for '{handle}': expected a list of posts")
+        info(f"Reading {handle}.twt …")
+        info(f"  {len(posts)} entries loaded")
 
-    threads = _build_threads(post_entries)
-    print(f"  {len(threads)} threads reconstructed")
+        post_entries = [p for p in posts if isinstance(p, dict) and p.get("type") in ("post", "quote")]
+        info(f"  {len(post_entries)} posts/quotes")
 
-    path = write_threads(handle, threads)
-    print(f"Wrote {path}")
+        threads = _build_threads(post_entries)
+        info(f"  {len(threads)} threads reconstructed")
+
+        path = write_threads(handle, threads)
+        ok(f"Wrote {path}")
+    except SkycollError:
+        raise
+    except OSError as exc:
+        raise ParseError(f"failed to read or write thread data for '{handle}': {exc}") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParseError(f"invalid thread data for '{handle}': {exc}") from exc
+    except Exception as exc:
+        raise ParseError(f"unexpected threads error for '{handle}': {exc}") from exc

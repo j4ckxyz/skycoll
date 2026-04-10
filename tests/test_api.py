@@ -139,8 +139,9 @@ class TestRateLimitRetry:
     @patch("skycoll.api.time.sleep")
     @patch("skycoll.api.make_authenticated_request")
     def test_max_retries_exceeded(self, mock_request, mock_sleep):
-        """Should raise RuntimeError after max retries on 429."""
+        """Should raise RateLimitError after max retries on 429."""
         from skycoll.api import _paginated_get
+        from skycoll.errors import RateLimitError
 
         resp_429 = MagicMock()
         resp_429.status_code = 429
@@ -149,5 +150,5 @@ class TestRateLimitRetry:
         mock_request.return_value = resp_429
 
         session = _make_session()
-        with pytest.raises(RuntimeError, match="Rate-limited"):
+        with pytest.raises(RateLimitError, match="after 3 retries"):
             list(_paginated_get(session, "/xrpc/test"))

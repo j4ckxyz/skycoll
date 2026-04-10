@@ -10,6 +10,9 @@ import json
 import inspect
 import sys
 
+from skycoll.errors import NotFoundError, NetworkError, ParseError, SkycollError
+from skycoll.output import info
+
 
 def _event_repo_did(event: object) -> str | None:
     """Extract a repo DID from a firehose event object.
@@ -51,66 +54,65 @@ def run(
         limit: Stop after *limit* matching events.
     """
     try:
-        from atproto import AsyncFirehoseSubscribeReposClient
-        import asyncio
-    except ImportError:
-        print("Error: the 'atproto' package is required for the firehose command.")
-        print("Install it with: pip install atproto")
-        sys.exit(1)
-
-    # Resolve handle → DID if needed
-    filter_did = did
-    if handle and not filter_did:
-        from skycoll.resolve import resolve_handle_to_did
         try:
+            from atproto import AsyncFirehoseSubscribeReposClient
+            import asyncio
+        except ImportError as exc:
+            raise NotFoundError(
+                "the 'atproto' package is required for the firehose command (pip install atproto)"
+            ) from exc
+
+        filter_did = did
+        if handle and not filter_did:
+            from skycoll.resolve import resolve_handle_to_did
+
             filter_did = resolve_handle_to_did(handle)
-            print(f"Resolved {handle} → {filter_did}")
-        except RuntimeError as exc:
-            print(f"Could not resolve handle {handle}: {exc}")
-            sys.exit(1)
+            info(f"Resolved {handle} → {filter_did}")
 
-    if not filter_did and not handle:
-        print("Listening to all events (no --handle or --did filter).")
+        if not filter_did and not handle:
+            info("Listening to all events (no --handle or --did filter).")
 
-    count = 0
+        count = 0
 
-    async def _run() -> None:
-        nonlocal count
-        client = AsyncFirehoseSubscribeReposClient(base_uri=relay)
-
-        async def _on_message(event: object) -> None:
+        async def _run() -> None:
             nonlocal count
+            client = AsyncFirehoseSubscribeReposClient(base_uri=relay)
 
-            repo_did = _event_repo_did(event)
-            if filter_did and repo_did != filter_did:
-                return
+            async def _on_message(event: object) -> None:
+                nonlocal count
 
-            event_data = _event_payload(event)
-            print(json.dumps(event_data, default=str, ensure_ascii=False))
-            sys.stdout.flush()
+                repo_did = _event_repo_did(event)
+                if filter_did and repo_did != filter_did:
+                    return
 
-            count += 1
-            if limit and count >= limit:
-                print(f"\nReached limit of {limit} events.")
-                await client.stop()
+                event_data = _event_payload(event)
+                info(json.dumps(event_data, default=str, ensure_ascii=False))
+                sys.stdout.flush()
 
-        # atproto API compatibility:
-        # - Newer versions: start(on_message_callback, ...)
-        # - Older versions: async iterator from start()
-        try:
-            start_sig = inspect.signature(client.start)
-            if len(start_sig.parameters) >= 1:
-                await client.start(_on_message)
-                return
-        except Exception:
-            pass
+                count += 1
+                if limit and count >= limit:
+                    info(f"\nReached limit of {limit} events.")
+                    await client.stop()
 
-        async for event in client.start():
-            await _on_message(event)
-            if limit and count >= limit:
-                break
+            try:
+                start_sig = inspect.signature(client.start)
+                if len(start_sig.parameters) >= 1:
+                    await client.start(_on_message)
+                    return
+            except Exception:
+                pass
 
-    try:
+            async for event in client.start():
+                await _on_message(event)
+                if limit and count >= limit:
+                    break
+
         asyncio.run(_run())
-    except KeyboardInterrupt:
-        print(f"\nStopped after {count} events.")
+    except SkycollError:
+        raise
+    except OSError as exc:
+        raise ParseError(f"firehose output error: {exc}") from exc
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ParseError(f"invalid firehose event data: {exc}") from exc
+    except Exception as exc:
+        raise NetworkError(f"firehose stream failed: {exc}") from exc

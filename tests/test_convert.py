@@ -54,6 +54,7 @@ def test_convert_gexf_to_gml(tmp_dir):
 
 def test_convert_missing_source_raises(tmp_dir):
     from skycoll.commands.convert import run
+    from skycoll.errors import NotFoundError
 
-    with pytest.raises(RuntimeError, match="Missing source file"):
+    with pytest.raises(NotFoundError, match="missing source file"):
         run("alice", to_format="gexf")
