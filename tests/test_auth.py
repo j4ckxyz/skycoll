@@ -19,16 +19,17 @@ from skycoll.auth import (
     jwk_to_private_key,
     Session,
     discover_auth_server,
+    _do_token_request,
     _b64url,
 )
 
 
-def _mock_response(status_code=200, json_data=None, text=""):
+def _mock_response(status_code=200, json_data=None, text="", headers=None):
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = status_code
     resp.json.return_value = json_data or {}
     resp.text = text or (json.dumps(json_data) if json_data else "")
-    resp.headers = {}
+    resp.headers = headers or {}
     return resp
 
 
@@ -302,3 +303,64 @@ class TestDiscoverAuthServer:
         mock_get.return_value = MagicMock(status_code=404, headers={})
         with pytest.raises(RuntimeError, match="Cannot discover OAuth auth server"):
             discover_auth_server("https://unreachable.example.com")
+
+
+class TestTokenRequest:
+    """Test token endpoint nonce retry behavior."""
+
+    @patch("skycoll.auth.httpx.post")
+    def test_retries_with_nonce_after_400(self, mock_post):
+        """Retry token request once when server returns DPoP-Nonce on 400."""
+        import base64
+
+        key = generate_dpop_keypair()
+        first = _mock_response(
+            400,
+            json_data={"error": "use_dpop_nonce"},
+            headers={"DPoP-Nonce": "nonce-123"},
+        )
+        second = _mock_response(
+            200,
+            json_data={"access_token": "tok", "refresh_token": "ref", "sub": "did:plc:abc"},
+        )
+        mock_post.side_effect = [first, second]
+
+        data, nonce = _do_token_request(
+            "https://bsky.social/oauth/token",
+            {"grant_type": "authorization_code"},
+            key,
+            None,
+        )
+
+        assert data["access_token"] == "tok"
+        assert nonce == "nonce-123"
+        assert mock_post.call_count == 2
+
+        first_proof = mock_post.call_args_list[0].kwargs["headers"]["DPoP"]
+        second_proof = mock_post.call_args_list[1].kwargs["headers"]["DPoP"]
+
+        first_payload = json.loads(base64.urlsafe_b64decode(first_proof.split(".")[1] + "=="))
+        second_payload = json.loads(base64.urlsafe_b64decode(second_proof.split(".")[1] + "=="))
+
+        assert "nonce" not in first_payload
+        assert second_payload["nonce"] == "nonce-123"
+
+    @patch("skycoll.auth.httpx.post")
+    def test_400_without_nonce_raises(self, mock_post):
+        """Do not retry when 400 response has no DPoP-Nonce header."""
+        key = generate_dpop_keypair()
+        mock_post.return_value = _mock_response(
+            400,
+            json_data={"error": "invalid_request"},
+            headers={},
+        )
+
+        with pytest.raises(RuntimeError, match="Token request failed"):
+            _do_token_request(
+                "https://bsky.social/oauth/token",
+                {"grant_type": "authorization_code"},
+                key,
+                None,
+            )
+
+        assert mock_post.call_count == 1

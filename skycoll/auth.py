@@ -465,15 +465,33 @@ def _do_token_request(
     Returns:
         Tuple of (parsed JSON response, new DPoP-Nonce value).
     """
-    proof = build_dpop_proof(dpop_key, "POST", token_url, nonce=dpop_nonce)
-    headers = {"DPoP": proof, "Content-Type": "application/x-www-form-urlencoded"}
-    resp = httpx.post(token_url, data=body, headers=headers, follow_redirects=True, timeout=30)
-    new_nonce = _extract_nonce_from_response(resp)
-    if resp.status_code != 200:
+    nonce = dpop_nonce
+    for _ in range(2):
+        proof = build_dpop_proof(dpop_key, "POST", token_url, nonce=nonce)
+        headers = {"DPoP": proof, "Content-Type": "application/x-www-form-urlencoded"}
+        resp = httpx.post(
+            token_url,
+            data=body,
+            headers=headers,
+            follow_redirects=True,
+            timeout=30,
+        )
+        new_nonce = _extract_nonce_from_response(resp)
+
+        if resp.status_code == 200:
+            return resp.json(), (new_nonce or nonce)
+
+        # AT Protocol OAuth servers can require a fresh DPoP nonce and
+        # signal this with HTTP 400 + DPoP-Nonce. Retry once with it.
+        if resp.status_code == 400 and new_nonce and new_nonce != nonce:
+            nonce = new_nonce
+            continue
+
         raise RuntimeError(
             f"Token request failed (HTTP {resp.status_code}): {resp.text}"
         )
-    return resp.json(), new_nonce
+
+    raise RuntimeError("Token request failed after DPoP nonce retry")
 
 
 def authenticate(handle: str) -> Session:
@@ -554,20 +572,23 @@ def authenticate(handle: str) -> Session:
                 follow_redirects=True, timeout=30,
             )
 
-            # If the server requires a DPoP nonce, retry with it
+            # If the server requires a DPoP nonce, retry once with it.
             new_nonce = _extract_nonce_from_response(resp)
             if new_nonce:
                 dpop_nonce = new_nonce
-            if resp.status_code == 400 and not new_nonce:
-                # Some servers return a Use-Nonce or similar hint
-                new_nonce = resp.headers.get("DPoP-Nonce")
+            if resp.status_code == 400:
+                if not new_nonce:
+                    new_nonce = resp.headers.get("DPoP-Nonce")
                 if new_nonce:
                     dpop_nonce = new_nonce
                     proof = build_dpop_proof(dpop_key, "POST", par_url, nonce=dpop_nonce)
                     par_headers["DPoP"] = proof
                     resp = httpx.post(
-                        par_url, data=par_body, headers=par_headers,
-                        follow_redirects=True, timeout=30,
+                        par_url,
+                        data=par_body,
+                        headers=par_headers,
+                        follow_redirects=True,
+                        timeout=30,
                     )
                     new_nonce = _extract_nonce_from_response(resp)
                     if new_nonce:
