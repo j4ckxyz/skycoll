@@ -78,11 +78,18 @@ def resolve_handle_to_did(handle: str) -> str:
     except Exception:
         pass
 
-    raise RuntimeError(f"Cannot resolve handle {handle!r} to a DID")
+    raise RuntimeError(
+        f"Cannot resolve handle {handle!r} to a DID.\n"
+        f"  Tried: HTTPS well-known, bsky.social XRPC, DNS TXT.\n"
+        f"  Check that the handle is correct and the account exists."
+    )
 
 
 def resolve_did_to_handle(did: str) -> str:
     """Resolve a DID back to its handle via the DID document.
+
+    Also falls back to trying bsky.social's resolveHandle endpoint
+    if the DID document cannot be fetched directly.
 
     Args:
         did: A DID string (``did:plc:…`` or ``did:web:…``).
@@ -91,12 +98,38 @@ def resolve_did_to_handle(did: str) -> str:
         The associated handle (e.g. ``alice.bsky.social``).
 
     Raises:
-        RuntimeError: If the DID document cannot be fetched or contains no handle.
+        RuntimeError: If the DID cannot be resolved to a handle by any method.
     """
-    doc = fetch_did_document(did)
-    for aka in doc.get("alsoKnownAs", []):
-        if aka.startswith("at://"):
-            return aka[5:]
+    # 1) Try DID document
+    try:
+        doc = fetch_did_document(did)
+        for aka in doc.get("alsoKnownAs", []):
+            if aka.startswith("at://"):
+                return aka[5:]
+    except RuntimeError as exc:
+        # 2) Fallback: bsky.social XRPC can resolve some DIDs directly
+        try:
+            resp = httpx.get(
+                f"{_BSKY_SOCIAL}/xrpc/com.atproto.identity.resolveHandle",
+                params={"handle": did},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                h = data.get("handle")
+                if h:
+                    return h
+        except httpx.HTTPError:
+            pass
+
+        raise RuntimeError(
+            f"Cannot resolve DID {did!r} to a handle.\n"
+            f"  Reasons tried:\n"
+            f"    • DID document fetch failed: {exc}\n"
+            f"    • bsky.social XRPC fallback also failed.\n"
+            f"  Check that the DID is correct and the account exists."
+        )
+
     raise RuntimeError(f"DID document for {did} contains no handle")
 
 
@@ -121,14 +154,36 @@ def fetch_did_document(did: str) -> dict:
         domain = did[len("did:web:"):]
         url = f"https://{domain}/.well-known/did.json"
     else:
-        raise RuntimeError(f"Unsupported DID method in {did!r}")
+        raise RuntimeError(
+            f"Unsupported DID method in {did!r}.\n"
+            f"  Only did:plc and did:web are supported."
+        )
 
-    resp = httpx.get(url, follow_redirects=True, timeout=15)
+    try:
+        resp = httpx.get(url, follow_redirects=True, timeout=15)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            f"Network error fetching DID document for {did!r}:\n"
+            f"  {exc}"
+        )
+
+    if resp.status_code == 404:
+        raise RuntimeError(
+            f"DID not found: {did!r}\n"
+            f"  The PLC directory has no record of this DID.\n"
+            f"  Verify the DID is correct — a common mistake is\n"
+            f"  swapping letters (e.g. 'ae' vs 'ur')."
+        )
     if resp.status_code != 200:
         raise RuntimeError(
-            f"Failed to fetch DID document for {did} (HTTP {resp.status_code})"
+            f"Failed to fetch DID document for {did!r} (HTTP {resp.status_code})"
         )
-    return resp.json()
+    try:
+        return resp.json()
+    except json.JSONDecodeError:
+        raise RuntimeError(
+            f"DID document for {did!r} is not valid JSON"
+        )
 
 
 def resolve_pds_endpoint(did: str) -> str:
