@@ -182,15 +182,36 @@ skycoll threads j4ck.xyz
 
 ### `edgelist`
 
-Generate `<handle>.gml` from `.dat` and `fdat/` data. If `python-igraph` is installed, also renders a `<handle>.png` visualisation.
+Generate graph files from `.dat` and `fdat/` data.
+
+- Default output: `<handle>.gml`
+- Optional Gephi-native output: `<handle>.gexf` via `--gexf`
+- Use `--no-gml` to skip writing GML
+
+If `python-igraph` is installed and GML output is enabled, skycoll also renders a `<handle>.png` visualisation.
 
 The GML includes bidirectional edges, `mutual_only` attributes, and `node_type` attributes.
 
 ```bash
 skycoll edgelist j4ck.xyz
 
+# Also write GEXF for Gephi
+skycoll edgelist j4ck.xyz --gexf
+
+# Write only GEXF (no GML)
+skycoll edgelist j4ck.xyz --gexf --no-gml
+
 # Enrich edges with likes counts from Constellation
 skycoll edgelist j4ck.xyz --constellation https://constellation.example.com
+```
+
+### `convert`
+
+Convert an existing graph file between GML and GEXF without re-fetching data.
+
+```bash
+skycoll convert j4ck.xyz --to gexf
+skycoll convert j4ck.xyz --to gml
 ```
 
 ### `sync`
@@ -253,9 +274,18 @@ skycoll firehose --handle j4ck.xyz --limit 100
 | `<handle>.fav` | Tab-separated: `uri timestamp author_did author_handle text` |
 | `<handle>.threads` | JSON array of thread trees (root + nested replies) |
 | `<handle>.gml` | Graph Modeling Language file with `mutual_only` and `node_type` |
+| `<handle>.gexf` | GEXF 1.3 graph for Gephi with richer node/edge attributes |
 | `<handle>.car` | Raw CAR archive (binary) |
 | `<did>.plc` | PLC directory operation log (JSON) |
 | `img/<handle>` | Avatar image |
+
+## Gephi workflow
+
+1. Run `skycoll edgelist j4ck.xyz --gexf`
+2. Open `j4ck.xyz.gexf` in Gephi
+3. Use **File → Open** (Gephi auto-detects GEXF)
+4. Suggested layout: **ForceAtlas2** with **LinLog mode** enabled and **Prevent Overlap** on
+5. Use the `mutual` edge attribute for edge colouring and `followers_count` for node sizing
 
 ## Authentication details
 

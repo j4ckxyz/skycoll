@@ -8,8 +8,9 @@ Usage:
     skycoll [-v] posts <handle> [--car] [--appview NAME]
     skycoll [-v] likes <handle> [-p|--purge] [--appview NAME]
     skycoll [-v] threads <handle>
-    skycoll [-v] edgelist <handle> [--constellation HOST]
+    skycoll [-v] edgelist <handle> [--constellation HOST] [--gexf] [--no-gml]
     skycoll [-v] sync <handle>
+    skycoll [-v] convert <handle> --to {gml,gexf}
     skycoll [-v] backlinks <handle> --constellation HOST
     skycoll [-v] plc <did> [--audit]
     skycoll [-v] appviews
@@ -69,9 +70,16 @@ def main() -> None:
     p_threads.add_argument("handle", help="The handle used in `skycoll posts`")
 
     # edgelist
-    p_edgelist = sub.add_parser("edgelist", help="Generate .gml from .dat/.fdat data")
+    p_edgelist = sub.add_parser("edgelist", help="Generate .gml/.gexf from .dat/.fdat data")
     p_edgelist.add_argument("handle", help="The handle used in `skycoll init`")
     p_edgelist.add_argument("--constellation", default=None, help="Constellation host for likes enrichment")
+    p_edgelist.add_argument("--gexf", action="store_true", help="Also write <handle>.gexf (Gephi format)")
+    p_edgelist.add_argument("--no-gml", action="store_true", help="Do not write <handle>.gml")
+
+    # convert
+    p_convert = sub.add_parser("convert", help="Convert existing graph file between GML and GEXF")
+    p_convert.add_argument("handle", help="Handle basename of existing graph file")
+    p_convert.add_argument("--to", required=True, choices=["gml", "gexf"], help="Target graph format")
 
     # sync
     p_sync = sub.add_parser("sync", help="Download full repo CAR for archival")
@@ -130,7 +138,16 @@ def main() -> None:
 
     elif args.command == "edgelist":
         from skycoll.commands.edgelist import run
-        run(args.handle, constellation=args.constellation)
+        run(
+            args.handle,
+            constellation=args.constellation,
+            write_gexf_file=args.gexf,
+            write_gml_file=not args.no_gml,
+        )
+
+    elif args.command == "convert":
+        from skycoll.commands.convert import run
+        run(args.handle, to_format=args.to)
 
     elif args.command == "sync":
         from skycoll.commands.sync import run

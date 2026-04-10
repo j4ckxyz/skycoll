@@ -24,6 +24,8 @@ File formats:
 
   ``<handle>.gml`` — GML graph (produced by ``edgelist``).
 
+  ``<handle>.gexf`` — GEXF graph (Gephi-native; produced by ``edgelist --gexf``).
+
   ``<handle>.car`` — Raw CAR archive (produced by ``sync``).
 """
 
@@ -32,6 +34,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import xml.etree.ElementTree as ET
 from typing import Optional
 
 
@@ -493,3 +496,179 @@ def write_gml(
             )
         f.write("]\n")
     return path
+
+
+def write_gexf(handle: str, nodes: list[dict], edges: list[dict]) -> str:
+    """Write a GEXF 1.3 graph file for *handle*.
+
+    Nodes are expected to include graph attributes such as DID, handle,
+    display_name, follower/follow counts, node_type, avatar_url, and backlinks.
+    Edges are expected to include source/target DIDs and a mutual boolean.
+
+    Args:
+        handle: The focal user's handle.
+        nodes: List of node dicts.
+        edges: List of edge dicts with ``source``, ``target``, and ``mutual``.
+
+    Returns:
+        Path to the written ``.gexf`` file.
+    """
+    ns = "http://gexf.net/1.3"
+    ET.register_namespace("", ns)
+
+    gexf = ET.Element(f"{{{ns}}}gexf", {"version": "1.3"})
+    graph = ET.SubElement(gexf, f"{{{ns}}}graph", {"mode": "static", "defaultedgetype": "directed"})
+
+    attrs = ET.SubElement(graph, f"{{{ns}}}attributes", {"class": "node", "mode": "static"})
+    ET.SubElement(attrs, f"{{{ns}}}attribute", {"id": "display_name", "title": "display_name", "type": "string"})
+    ET.SubElement(attrs, f"{{{ns}}}attribute", {"id": "followers_count", "title": "followers_count", "type": "integer"})
+    ET.SubElement(attrs, f"{{{ns}}}attribute", {"id": "follows_count", "title": "follows_count", "type": "integer"})
+    ET.SubElement(attrs, f"{{{ns}}}attribute", {"id": "node_type", "title": "node_type", "type": "string"})
+    ET.SubElement(attrs, f"{{{ns}}}attribute", {"id": "avatar_url", "title": "avatar_url", "type": "string"})
+    ET.SubElement(attrs, f"{{{ns}}}attribute", {"id": "backlinks", "title": "backlinks", "type": "double"})
+
+    nodes_el = ET.SubElement(graph, f"{{{ns}}}nodes")
+    for node in nodes:
+        node_id = str(node.get("id", ""))
+        label = str(node.get("label", node_id))
+        n_el = ET.SubElement(nodes_el, f"{{{ns}}}node", {"id": node_id, "label": label})
+
+        avs = ET.SubElement(n_el, f"{{{ns}}}attvalues")
+        ET.SubElement(avs, f"{{{ns}}}attvalue", {"for": "display_name", "value": str(node.get("display_name", ""))})
+        ET.SubElement(avs, f"{{{ns}}}attvalue", {"for": "followers_count", "value": str(int(node.get("followers_count", 0) or 0))})
+        ET.SubElement(avs, f"{{{ns}}}attvalue", {"for": "follows_count", "value": str(int(node.get("follows_count", 0) or 0))})
+        ET.SubElement(avs, f"{{{ns}}}attvalue", {"for": "node_type", "value": str(node.get("node_type", ""))})
+        ET.SubElement(avs, f"{{{ns}}}attvalue", {"for": "avatar_url", "value": str(node.get("avatar_url", ""))})
+        ET.SubElement(avs, f"{{{ns}}}attvalue", {"for": "backlinks", "value": str(float(node.get("backlinks", 0.0) or 0.0))})
+
+    edges_el = ET.SubElement(graph, f"{{{ns}}}edges", {"type": "mixed"})
+    for i, edge in enumerate(edges):
+        mutual = bool(edge.get("mutual", False))
+        ET.SubElement(
+            edges_el,
+            f"{{{ns}}}edge",
+            {
+                "id": str(i),
+                "source": str(edge.get("source", "")),
+                "target": str(edge.get("target", "")),
+                "type": "undirected" if mutual else "directed",
+                "mutual": "true" if mutual else "false",
+            },
+        )
+
+    path = os.path.join(_base_dir(), f"{handle}.gexf")
+    tree = ET.ElementTree(gexf)
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+    return path
+
+
+def read_gml(path: str) -> tuple[list[dict], list[dict]]:
+    """Read a GML graph file and return ``(nodes, edges)``.
+
+    This parser is intentionally minimal and supports the GML shape emitted
+    by :func:`write_gml`.
+    """
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    with open(path) as f:
+        lines = [ln.strip() for ln in f if ln.strip()]
+
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln == "node [":
+            block: dict[str, str] = {}
+            i += 1
+            while i < len(lines) and lines[i] != "]":
+                parts = lines[i].split(" ", 1)
+                if len(parts) == 2:
+                    key, val = parts
+                    block[key] = val.strip().strip('"')
+                i += 1
+            nodes.append(
+                {
+                    "id": block.get("id", ""),
+                    "label": block.get("label", block.get("id", "")),
+                    "display_name": block.get("label", ""),
+                    "followers_count": 0,
+                    "follows_count": 0,
+                    "node_type": block.get("node_type", ""),
+                    "avatar_url": "",
+                    "backlinks": 0.0,
+                }
+            )
+        elif ln == "edge [":
+            block: dict[str, str] = {}
+            i += 1
+            while i < len(lines) and lines[i] != "]":
+                parts = lines[i].split(" ", 1)
+                if len(parts) == 2:
+                    key, val = parts
+                    block[key] = val.strip().strip('"')
+                i += 1
+            mutual_raw = block.get("mutual_only", "0")
+            mutual = mutual_raw in ("1", "true", "True")
+            edges.append(
+                {
+                    "source": block.get("source", ""),
+                    "target": block.get("target", ""),
+                    "mutual": mutual,
+                }
+            )
+        i += 1
+
+    return nodes, edges
+
+
+def read_gexf(path: str) -> tuple[list[dict], list[dict]]:
+    """Read a GEXF 1.3 graph file and return ``(nodes, edges)``."""
+    ns = {"g": "http://gexf.net/1.3"}
+    tree = ET.parse(path)
+    root = tree.getroot()
+
+    graph = root.find("g:graph", ns)
+    if graph is None:
+        return [], []
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    nodes_el = graph.find("g:nodes", ns)
+    if nodes_el is not None:
+        for n in nodes_el.findall("g:node", ns):
+            vals: dict[str, str] = {}
+            attvalues = n.find("g:attvalues", ns)
+            if attvalues is not None:
+                for av in attvalues.findall("g:attvalue", ns):
+                    vals[av.get("for", "")] = av.get("value", "")
+
+            nodes.append(
+                {
+                    "id": n.get("id", ""),
+                    "label": n.get("label", ""),
+                    "display_name": vals.get("display_name", ""),
+                    "followers_count": int(vals.get("followers_count", "0") or 0),
+                    "follows_count": int(vals.get("follows_count", "0") or 0),
+                    "node_type": vals.get("node_type", ""),
+                    "avatar_url": vals.get("avatar_url", ""),
+                    "backlinks": float(vals.get("backlinks", "0") or 0),
+                }
+            )
+
+    edges_el = graph.find("g:edges", ns)
+    if edges_el is not None:
+        for e in edges_el.findall("g:edge", ns):
+            mutual_raw = e.get("mutual", "false")
+            mutual = mutual_raw.lower() == "true"
+            if not mutual:
+                mutual = e.get("type", "") == "undirected"
+            edges.append(
+                {
+                    "source": e.get("source", ""),
+                    "target": e.get("target", ""),
+                    "mutual": mutual,
+                }
+            )
+
+    return nodes, edges

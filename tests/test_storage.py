@@ -18,6 +18,9 @@ from skycoll.storage import (
     read_threads,
     write_car,
     write_gml,
+    write_gexf,
+    read_gml,
+    read_gexf,
     write_fdat,
     avatar_path,
 )
@@ -259,6 +262,61 @@ class TestGmlWrite:
         assert 'node_type "starter_pack"' in content
         assert "mutual_only 0" in content
         assert "mutual_only 1" in content
+
+
+class TestGexfIO:
+    """Test GEXF write/read and GML read helpers."""
+
+    def test_write_and_read_gexf(self, tmp_dir):
+        nodes = [
+            {
+                "id": "did:plc:alice",
+                "label": "alice.bsky.social",
+                "display_name": "Alice",
+                "followers_count": 10,
+                "follows_count": 5,
+                "node_type": "self",
+                "avatar_url": "https://img.example.com/alice.jpg",
+                "backlinks": 2.0,
+            },
+            {
+                "id": "did:plc:bob",
+                "label": "bob.bsky.social",
+                "display_name": "Bob",
+                "followers_count": 4,
+                "follows_count": 7,
+                "node_type": "follow",
+                "avatar_url": "",
+                "backlinks": 0.0,
+            },
+        ]
+        edges = [
+            {"source": "did:plc:alice", "target": "did:plc:bob", "mutual": True},
+            {"source": "did:plc:bob", "target": "did:plc:alice", "mutual": False},
+        ]
+
+        path = write_gexf("alice", nodes, edges)
+        assert os.path.exists(path)
+
+        loaded_nodes, loaded_edges = read_gexf(path)
+        assert len(loaded_nodes) == 2
+        assert len(loaded_edges) == 2
+        assert loaded_nodes[0]["id"].startswith("did:")
+        assert loaded_nodes[0]["followers_count"] >= 0
+        assert isinstance(loaded_edges[0]["mutual"], bool)
+
+    def test_read_gml_from_writer_shape(self, tmp_dir):
+        nodes = [
+            {"id": "alice", "label": "Alice", "node_type": "self"},
+            {"id": "bob", "label": "Bob", "node_type": "follow"},
+        ]
+        edges = [("alice", "bob", False), ("bob", "alice", True)]
+        path = write_gml("alice", nodes, edges)
+
+        loaded_nodes, loaded_edges = read_gml(path)
+        assert len(loaded_nodes) == 2
+        assert len(loaded_edges) == 2
+        assert loaded_edges[0]["source"] in ("alice", "bob")
 
 
 class TestFdatWrite:
