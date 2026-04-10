@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -22,18 +22,14 @@ class TestFetchCommand:
         assert "No .dat file found for 'alice.bsky.social'." in str(exc.value)
         assert "Run: skycoll init alice.bsky.social" in str(exc.value)
 
-    @patch("skycoll.commands.fetch.write_fdat")
-    @patch("skycoll.commands.fetch.get_follows")
-    @patch("skycoll.commands.fetch.get_profile")
+    @patch("skycoll.commands.fetch._run_workers", new_callable=AsyncMock)
     @patch("skycoll.commands.fetch.resolve")
     @patch("skycoll.commands.fetch.read_dat")
-    def test_fetch_uses_public_path_without_auth(
+    def test_fetch_uses_worker_pipeline(
         self,
         mock_read_dat,
         mock_resolve,
-        mock_get_profile,
-        mock_get_follows,
-        mock_write_fdat,
+        mock_run_workers,
     ):
         from skycoll.commands.fetch import run
 
@@ -45,15 +41,23 @@ class TestFetchCommand:
             "handle": "alice.bsky.social",
             "pds": "https://pds.example.com",
         }
-        mock_get_profile.return_value = {"did": "did:plc:bob", "displayName": "Bob", "avatar": ""}
-        mock_get_follows.return_value = []
-        mock_write_fdat.return_value = "/tmp/fdat/bob.bsky.social.dat"
 
-        run("alice.bsky.social")
+        run("alice.bsky.social", workers=3)
+        mock_run_workers.assert_awaited_once_with(
+            [{"handle": "bob.bsky.social", "did": "did:plc:bob"}],
+            "https://pds.example.com",
+            3,
+        )
 
-        args, kwargs = mock_get_profile.call_args
-        assert args[0] is None
-        assert kwargs["pds_endpoint"] == "https://pds.example.com"
+    def test_fetch_rejects_invalid_worker_count(self):
+        from skycoll.commands.fetch import run
+        from skycoll.errors import ParseError
+
+        with pytest.raises(ParseError, match="workers must be between 1 and 10"):
+            run("alice.bsky.social", workers=0)
+
+        with pytest.raises(ParseError, match="workers must be between 1 and 10"):
+            run("alice.bsky.social", workers=11)
 
 
 class TestPostsCommand:

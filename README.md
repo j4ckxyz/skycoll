@@ -133,6 +133,9 @@ Fetch the follows of every person listed in `<handle>.dat`. Writes one `fdat/<fr
 
 ```bash
 skycoll fetch j4ck.xyz
+
+# Parallel fetch with 5 workers (faster on large follow graphs)
+skycoll fetch j4ck.xyz --workers 5
 ```
 
 ### `posts`

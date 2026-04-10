@@ -74,6 +74,16 @@ def test_auth_list_command_forwarded() -> None:
     mock_list.assert_called_once_with()
 
 
+def test_fetch_workers_forwarded() -> None:
+    from skycoll import __main__ as cli
+
+    with patch("sys.argv", ["skycoll", "fetch", "alice.bsky.social", "--workers", "5"]):
+        with patch("skycoll.commands.fetch.run") as mock_run:
+            cli.main()
+
+    mock_run.assert_called_once_with("alice.bsky.social", workers=5)
+
+
 def test_cli_handles_typed_errors_without_traceback(capsys) -> None:
     from skycoll import __main__ as cli
     from skycoll.errors import NotFoundError
